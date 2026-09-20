@@ -1,0 +1,1 @@
+id(x){while(true){}return x;}main(){local i=0;local y=0;while(true){y=id(17);++i;if(i==3)break;}return y;}

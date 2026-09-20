@@ -1,0 +1,18 @@
+[package]
+name = "zebc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+zeb-frontend = { path = "../zeb-frontend" }
+
+# Only the round-trip test needs it: the encoder is in the front end and the
+# decoder is in the runtime.
+[dev-dependencies]
+zeb-runtime = { path = "../zeb-runtime" }
+
+[lints]
+workspace = true

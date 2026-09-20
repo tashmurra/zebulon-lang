@@ -1,0 +1,1 @@
+step(x,limit){return (x*17+11)%limit;}main(seed,size,iterations){local x=seed;while(iterations>0){x=step(x,size);--iterations;}return x;}

@@ -1,0 +1,9 @@
+/target/
+/build/
+.local/
+.env
+.env.*
+.envrc
+.DS_Store
+__pycache__/
+*.pyc

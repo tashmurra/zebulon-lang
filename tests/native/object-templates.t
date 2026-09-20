@@ -1,0 +1,30 @@
+object template @location 'name';
+class Thing: object;
+Thing template 'name' +points? "desc"?;
+Thing template 'other';
+class Book: Thing;
+shelf: object;
+book: Book 'book' +7 "Book description.\n";
+coin: Thing 'coin';
+box: object @shelf 'box';
+class Pair: object;
+Pair template 'first'? 'last';
+pair: Pair 'only';
+class Choice: object;
+Choice template +positive | -negative;
+choice: Choice -4;
+class A: object;
+class B: object;
+A template 'left';
+B template 'right';
+combined: B, A 'chosen';
+main() {
+    if (book.name != 'book' || book.points != 7) return 'FAIL book';
+    if (coin.name != 'coin' || coin.other != nil) return 'FAIL first template';
+    if (box.location != shelf || box.name != 'box') return 'FAIL root';
+    if (pair.first != nil || pair.last != 'only') return 'FAIL optional';
+    if (choice.negative != 4 || choice.positive != nil) return 'FAIL alternative';
+    if (combined.right != 'chosen' || combined.left != nil) return 'FAIL superclass';
+    book.desc;
+    return 'PASS';
+}

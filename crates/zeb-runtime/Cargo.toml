@@ -1,0 +1,17 @@
+[package]
+name = "zeb-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[features]
+default = ["objects"]
+objects = []
+
+[lib]
+crate-type = ["rlib", "dylib"]
+
+[lints]
+workspace = true
