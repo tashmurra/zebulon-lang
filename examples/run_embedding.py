@@ -29,9 +29,9 @@ def main():
             sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], cwd=bundle, text=True).strip()
         flags = ["-isysroot", sdk, "-mmacosx-version-min=14.0", "-Wl,-rpath,@loader_path"]
     elif system == "Linux":
-        flags = ["-Wl,-rpath,$ORIGIN", "-fuse-ld=" + str(Path(binary) / "ld.lld")]
+        flags = ["-Wl,-rpath,$ORIGIN", "--ld-path=" + str(Path(binary) / "ld.lld")]
     elif system == "Windows":
-        flags = ["-fuse-ld=" + str(Path(binary) / "lld-link.exe")]
+        flags = ["-fuse-ld=lld", "-B" + binary]
     else:
         raise SystemExit("unsupported native host")
     # The manifest/header are trusted outputs of this compiler, not downloaded input.

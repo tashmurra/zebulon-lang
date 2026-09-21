@@ -35,17 +35,15 @@ impl Toolchain {
     pub fn linker_args(&self, target: Target) -> Vec<String> {
         if target.is_macos() {
             vec![]
+        } else if target.is_windows() {
+            // Clang's MSVC driver resolves a linker name through its program
+            // search paths; unlike its ELF driver it does not use --ld-path.
+            vec!["-fuse-ld=lld".into(), format!("-B{}", self.bin)]
         } else {
-            vec![format!(
-                "-fuse-ld={}",
-                self.tool(if target.is_windows() {
-                    "lld-link"
-                } else {
-                    "ld.lld"
-                })
-            )]
+            vec![format!("--ld-path={}", self.tool("ld.lld"))]
         }
     }
+
     pub fn loader_args(&self, target: Target) -> Vec<String> {
         if target.is_macos() {
             vec!["-Wl,-rpath,@loader_path".into()]

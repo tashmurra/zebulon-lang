@@ -206,7 +206,7 @@ fn llvm_inspection_targets_are_explicit_and_build_requires_output() {
 
 #[test]
 #[ignore = "requires LLVM 22.1.8 and host native prerequisites"]
-fn universal_scalar_build_preserves_existing_outputs() {
+fn native_scalar_build_preserves_existing_outputs() {
     let fixture = Fixture::new();
     fs::write(
         fixture.0.join("game.t"),
@@ -330,7 +330,8 @@ fn shared_scalar_bundle_runs_consumer_and_reports_source_error() {
             } else {
                 output.stderr
             })
-            .unwrap(),
+            .unwrap()
+            .replace("\r\n", "\n"),
             expected
         );
         let manifest = fs::read_to_string(fixture.0.join(name).join("manifest.json")).unwrap();

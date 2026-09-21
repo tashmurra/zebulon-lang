@@ -40,7 +40,7 @@ fn emission_keeps_checked_outcomes_and_source_coordinates() {
 }
 #[test]
 #[ignore = "requires pinned LLVM and host native prerequisites"]
-fn native_scalar_cases_o0_o2_and_both_architectures() {
+fn native_scalar_cases_o0_o2_for_host_targets() {
     let temporary = common::TempDir::new("llvm_native");
     let dir = temporary.0.clone();
     let tools = common::tools(&dir);
@@ -606,7 +606,7 @@ fn native_scalar_cases_o0_o2_and_both_architectures() {
         check_existing("runaway.ll", &runaway);
         println!(
             "{} matrix LLVM modules and runaway LLVM byte-identical to prior executed inputs",
-            count * 2
+            count * tools.host.slices().len()
         );
         return;
     }
@@ -643,7 +643,7 @@ fn native_scalar_cases_o0_o2_and_both_architectures() {
     println!(
         "{count} cases: {} host executions; {} other-architecture object builds; {} LLVM verification passes",
         count * 2,
-        count * 2,
-        count * 2
+        count * 2 * (tools.host.slices().len() - 1),
+        count * tools.host.slices().len()
     );
 }

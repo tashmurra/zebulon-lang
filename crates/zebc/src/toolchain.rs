@@ -145,7 +145,12 @@ fn directory_files(path: &Path, suffixes: &[&str]) -> Result<Vec<PathBuf>, Strin
     let mut found = Vec::new();
     for entry in entries {
         let path = entry.map_err(|e| e.to_string())?.path();
-        if path.is_file() && suffixes.iter().any(|s| path.to_string_lossy().ends_with(s)) {
+        if path.is_file()
+            && suffixes.iter().any(|s| {
+                let name = path.to_string_lossy();
+                name.ends_with(s) || (*s == ".so" && name.contains(".so."))
+            })
+        {
             found.push(path);
         }
     }
@@ -236,6 +241,9 @@ impl Toolchain {
             )?;
             inputs.push(full);
         }
+        if host.is_windows() {
+            inputs.extend(directory_files(Path::new(&bin), &[".dll"])?);
+        }
         let libdir = output(&dir, &llvm, &["--libdir"])?;
         inputs.extend(directory_files(
             Path::new(&libdir),
@@ -270,6 +278,12 @@ impl Toolchain {
             &Path::new(&sysroot).join("lib"),
             &[".dylib", ".so", ".dll"],
         )?);
+        if host.is_windows() {
+            inputs.extend(directory_files(
+                &Path::new(&sysroot).join("bin"),
+                &[".dll"],
+            )?);
+        }
         for target in host.slices() {
             inputs.extend(target_libraries(&dir, &rustc, target.rust_triple())?);
         }
@@ -393,7 +407,7 @@ mod tests {
         }
     }
     #[test]
-    fn both_mac_hosts_and_no_other_platforms() {
+    fn supported_hosts_have_matching_rust_targets() {
         assert_eq!(host_target("macos", "x86_64").unwrap(), TARGETS[0]);
         assert_eq!(host_target("macos", "aarch64").unwrap(), TARGETS[1]);
         assert_eq!(
