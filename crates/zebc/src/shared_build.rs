@@ -15,12 +15,7 @@ fn command(dir: &Path, program: &str, args: &[&str]) -> Result<String, String> {
     run(dir, program, args, Duration::from_secs(60))
 }
 fn hash(dir: &Path, file: &str) -> Result<String, String> {
-    let text = command(dir, "/usr/bin/shasum", &["-a", "256", file])?;
-    let digest = text.split_whitespace().next().ok_or("missing digest")?;
-    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("invalid digest".to_owned());
-    }
-    Ok(digest.to_owned())
+    zebc::digest::file(&dir.join(file))
 }
 fn entry_wrapper(entry: usize, symbol: &str, target: Target, arity: usize) -> String {
     let version = if arity == 0 { 1 } else { 2 };
@@ -32,9 +27,9 @@ fn entry_wrapper(entry: usize, symbol: &str, target: Target, arity: usize) -> St
         .map(|i| format!("i64 %packed{i}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let cpu = target.cpu();
+    let target_attributes = target.function_attributes();
     format!(
-        "\ndefine i64 @{symbol}(i32 %abi{parameters}) \"target-cpu\"=\"{cpu}\" {{\n  %matches = icmp eq i32 %abi, {version}\n  br i1 %matches, label %invoke, label %mismatch\nmismatch:\n  ret i64 7\ninvoke:\n{packing}  %r = call %out @zfn{entry}({arguments})\n  %value = extractvalue %out %r, 0\n  %error = extractvalue %out %r, 1\n  %site = extractvalue %out %r, 2\n  %failed = icmp ne i32 %error, 0\n  %kind = add i32 %error, 2\n  %tag = zext i32 %kind to i64\n  %payload = shl i64 %site, 32\n  %failure = or i64 %payload, %tag\n  %word = select i1 %failed, i64 %failure, i64 %value\n  ret i64 %word\n}}\n"
+        "\ndefine i64 @{symbol}(i32 %abi{parameters}) {target_attributes} {{\n  %matches = icmp eq i32 %abi, {version}\n  br i1 %matches, label %invoke, label %mismatch\nmismatch:\n  ret i64 7\ninvoke:\n{packing}  %r = call %out @zfn{entry}({arguments})\n  %value = extractvalue %out %r, 0\n  %error = extractvalue %out %r, 1\n  %site = extractvalue %out %r, 2\n  %failed = icmp ne i32 %error, 0\n  %kind = add i32 %error, 2\n  %tag = zext i32 %kind to i64\n  %payload = shl i64 %site, 32\n  %failure = or i64 %payload, %tag\n  %word = select i1 %failed, i64 %failure, i64 %value\n  ret i64 %word\n}}\n"
     )
 }
 fn consumer(symbol: &str, arity: usize) -> String {
@@ -105,9 +100,7 @@ pub fn build(
     if full_lto && (format != Format::Shared || !optimize) {
         return Err("full LTO requires optimized shared output".to_owned());
     }
-    if !cfg!(target_os = "macos") {
-        return Err("linkable builds currently require macOS".to_owned());
-    }
+    let host = Target::host()?;
     if source.byte_len() > u32::MAX as usize {
         return Err("scalar native ABI requires source offsets within u32".to_owned());
     }
@@ -128,8 +121,7 @@ pub fn build(
     let result = (|| {
         let tools = Toolchain::resolve(&out)?;
         tools.record(&out)?;
-        let bin = tools.bin.as_str();
-        let sdk = tools.sdk.as_str();
+
         let rustc = tools.rustc.clone();
         let compiler = std::env::current_exe().map_err(|e| e.to_string())?;
         let compiler = compiler
@@ -137,8 +129,8 @@ pub fn build(
             .ok_or("compiler path must be UTF-8 for this initial driver")?;
         for (name, program, expected) in [
             ("rustc", rustc.clone(), "rustc 1.98.1"),
-            ("opt", format!("{bin}/opt"), "version 22.1.8"),
-            ("clang", format!("{bin}/clang"), "version 22.1.8"),
+            ("opt", tools.tool("opt"), "version 22.1.8"),
+            ("clang", tools.tool("clang"), "version 22.1.8"),
         ] {
             let text = command(&out, &program, &["--version"])?;
             if !text.contains(expected) {
@@ -153,17 +145,14 @@ pub fn build(
             "source-encoding.txt",
             format!("{:?}\n", source.encoding),
         )?;
-        let tool_hashes = command(
+        let tool_hashes = zebc::digest::sums(
             &out,
-            "/usr/bin/shasum",
             &[
-                "-a",
-                "256",
                 compiler,
                 &rustc,
-                &format!("{bin}/opt"),
-                &format!("{bin}/clang"),
-                &format!("{bin}/llvm-ar"),
+                &tools.tool("opt"),
+                &tools.tool("clang"),
+                &tools.tool("llvm-ar"),
             ],
         )?;
         write(&out, "TOOLS-SHA256SUMS", &tool_hashes)?;
@@ -179,17 +168,29 @@ pub fn build(
                 source.encoding
             ),
         )?;
+        let mut identity_file = fs::OpenOptions::new()
+            .append(true)
+            .open(out.join("identity.txt"))
+            .map_err(|e| e.to_string())?;
+        writeln!(
+            identity_file,
+            "{}\n{}\n{}",
+            tools.lock_json,
+            tools.profile_json,
+            include_str!("shared_build.rs")
+        )
+        .map_err(|e| e.to_string())?;
         let identity = hash(&out, "identity.txt")?;
         let symbol = format!("zeb_game_{identity}_v{version}");
         let game_ext = match format {
-            Format::Shared => "dylib",
-            Format::Object => "o",
-            Format::Static => "a",
+            Format::Shared => host.shared_ext(),
+            Format::Object => host.object_ext(),
+            Format::Static => host.archive_ext(),
         };
         let runtime_ext = if format == Format::Shared {
-            "dylib"
+            host.shared_ext()
         } else {
-            "o"
+            host.object_ext()
         };
         let game_lib = format!("libzeb_game_{identity}.{game_ext}");
         let runtime_lib = format!("libzeb_runtime_{identity}.{runtime_ext}");
@@ -205,87 +206,62 @@ pub fn build(
         )?;
         write(&out, "consumer.c", consumer(&symbol, arity))?;
         let mut slices = Vec::new();
-        for (arch, target, rust_target) in [
-            ("x86_64", Target::MacX86_64, "x86_64-apple-darwin"),
-            ("arm64", Target::MacArm64, "aarch64-apple-darwin"),
-        ] {
+        let consumer_name = host.executable("consumer");
+        for &target in host.slices() {
+            let arch = target.arch();
+            let rust_target = target.rust_triple();
             let folder = out.join(arch);
             fs::create_dir(&folder).map_err(|e| e.to_string())?;
             let text = if full_lto {
                 compile_runtime_bitcode(&folder, target, rust_target, &rustc, &tools)?;
                 String::new()
-            } else if format == Format::Shared {
-                command(
-                    &folder,
-                    "/usr/bin/env",
-                    &[
-                        "MACOSX_DEPLOYMENT_TARGET=14.0",
-                        &format!("SDKROOT={sdk}"),
-                        &rustc,
-                        "--edition=2024",
-                        "--crate-name",
-                        "zeb_runtime",
-                        "--crate-type=dylib",
-                        "--print=link-args",
-                        "-C",
-                        &format!("linker={bin}/clang"),
-                        "--target",
-                        rust_target,
-                        "-C",
-                        &format!("target-cpu={}", target.cpu()),
-                        "-C",
-                        "opt-level=2",
-                        "-C",
-                        &format!("link-arg=-Wl,-install_name,@rpath/{runtime_lib}"),
-                        "../runtime.rs",
-                        "-o",
-                        &runtime_lib,
-                    ],
-                )?
             } else {
-                command(
-                    &folder,
-                    "/usr/bin/env",
-                    &[
-                        "MACOSX_DEPLOYMENT_TARGET=14.0",
-                        &format!("SDKROOT={sdk}"),
-                        &rustc,
-                        "--edition=2024",
-                        "--crate-name",
-                        "zeb_runtime",
-                        "--crate-type=lib",
-                        "--emit=obj",
-                        "--target",
-                        rust_target,
-                        "-C",
-                        &format!("target-cpu={}", target.cpu()),
-                        "-C",
-                        "opt-level=2",
-                        "../runtime.rs",
-                        "-o",
-                        &runtime_lib,
-                    ],
-                )?
+                let mut args: Vec<String> = [
+                    "--edition=2024",
+                    "--crate-name=zeb_runtime",
+                    "--target",
+                    rust_target,
+                    "-C",
+                    "opt-level=2",
+                    "../runtime.rs",
+                    "-o",
+                    &runtime_lib,
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+                args.extend(["-C".into(), format!("target-cpu={}", target.cpu())]);
+                if format == Format::Shared {
+                    args.push("--crate-type=dylib".into());
+                    args.extend(tools.rust_args(target, &runtime_lib));
+                } else {
+                    args.extend(["--crate-type=lib".into(), "--emit=obj".into()]);
+                }
+                tools.run(&folder, &rustc, &args)?
             };
             write(&folder, "rust-build.txt", text)?;
-            let symbols = command(
-                &folder,
-                &format!("{bin}/llvm-nm"),
-                &[
-                    "--extern-only",
-                    "--defined-only",
+            let symbols = if target.is_windows() && format == Format::Shared && !full_lto {
+                tools.exports(&folder, &runtime_lib)?
+            } else {
+                tools.symbols(
+                    &folder,
                     if full_lto { "runtime.bc" } else { &runtime_lib },
-                ],
-            )?;
+                    false,
+                )?
+            };
             let candidates: Vec<_> = symbols
                 .lines()
                 .filter_map(|line| line.split_whitespace().last())
-                .filter(|s| s.starts_with("__R") && s.ends_with("13SCALAR_API_V1"))
+                .filter(|s| {
+                    target.ir_symbol(s).starts_with("_R")
+                        && s.ends_with("13SCALAR_API_V1")
+                        && !s.starts_with("__imp_")
+                })
                 .collect();
             if candidates.len() != 1 {
                 return Err("runtime API symbol is missing or ambiguous".to_owned());
             }
-            let runtime_symbol = &candidates[0][1..];
+            let runtime_symbol = target.ir_symbol(candidates[0]);
             write(&folder, "runtime-symbol.txt", runtime_symbol)?;
             let mut module = if optimize {
                 llvm::emit_with_runtime_rooted(ast, target, runtime_symbol, &[entry])
@@ -294,10 +270,17 @@ pub fn build(
             }
             .map_err(|d| format!("{}: {}", d.code, d.message))?;
             module += &entry_wrapper(entry, &symbol, target, arity);
+            if target.is_windows() && format == Format::Shared && !full_lto {
+                module = module.replace(
+                    "external constant %scalar_api",
+                    "external dllimport constant %scalar_api",
+                );
+            }
+            let module = zebc::platform::export_ir(module, target);
             write(&folder, "game.ll", module)?;
             command(
                 &folder,
-                &format!("{bin}/opt"),
+                &tools.tool("opt"),
                 &["-passes=verify", "-disable-output", "game.ll"],
             )?;
             // Retain the actual object used by every link/archive, together with
@@ -308,22 +291,16 @@ pub fn build(
                 "game.o"
             };
             if !full_lto {
-                let text = command(
+                let text = tools.clang(
                     &folder,
-                    &format!("{bin}/clang"),
+                    target,
                     &[
-                        "-target",
-                        target.triple(),
-                        target.clang_cpu(),
-                        "-isysroot",
-                        sdk,
-                        "-mmacosx-version-min=14.0",
-                        if optimize { "-O2" } else { "-O0" },
-                        "-fstack-usage",
-                        "-c",
-                        "game.ll",
-                        "-o",
-                        object,
+                        if optimize { "-O2".into() } else { "-O0".into() },
+                        "-fstack-usage".into(),
+                        "-c".into(),
+                        "game.ll".into(),
+                        "-o".into(),
+                        object.into(),
                     ],
                 )?;
                 write(&folder, "game-build.txt", text)?;
@@ -335,30 +312,19 @@ pub fn build(
                 }
                 fs::rename(stack_path, folder.join("game-stack.su")).map_err(|e| e.to_string())?;
                 if format == Format::Shared {
-                    let text = command(
-                        &folder,
-                        &format!("{bin}/clang"),
-                        &[
-                            "-target",
-                            target.triple(),
-                            target.clang_cpu(),
-                            "-isysroot",
-                            sdk,
-                            "-mmacosx-version-min=14.0",
-                            "-dynamiclib",
-                            object,
-                            &runtime_lib,
-                            "-Wl,-rpath,@loader_path",
-                            &format!("-Wl,-install_name,@rpath/{game_lib}"),
-                            "-o",
-                            &game_lib,
-                        ],
-                    )?;
+                    let mut args = tools.shared_args(target, &game_lib);
+                    args.extend([
+                        object.into(),
+                        tools.import_library(&runtime_lib),
+                        "-o".into(),
+                        game_lib.clone(),
+                    ]);
+                    let text = tools.clang(&folder, target, &args)?;
                     write(&folder, "game-link.txt", text)?;
                 } else if format == Format::Static {
                     let text = command(
                         &folder,
-                        &format!("{bin}/llvm-ar"),
+                        &tools.tool("llvm-ar"),
                         &["rcsD", &game_lib, object, &runtime_lib],
                     )?;
                     write(&folder, "archive-build.txt", text)?;
@@ -367,82 +333,52 @@ pub fn build(
             if full_lto {
                 full_link(&folder, target, &game_lib, &tools)?;
             }
-            let exports = command(
-                &folder,
-                &format!("{bin}/llvm-nm"),
-                &["--extern-only", "--defined-only", &game_lib],
-            )?;
-            if !exports
-                .lines()
-                .any(|line| line.split_whitespace().last() == Some(&format!("_{symbol}")))
-            {
+            let exports = tools.exports(&folder, &game_lib)?;
+            if !exports.lines().any(|line| {
+                line.split_whitespace()
+                    .last()
+                    .is_some_and(|s| target.ir_symbol(s) == symbol)
+            }) {
                 return Err("game entry export missing".to_owned());
             }
             write(&folder, "game-symbols.txt", exports)?;
-            let mut consumer_args = vec![
-                "-target",
-                target.triple(),
-                target.clang_cpu(),
-                "-isysroot",
-                sdk,
-                "-mmacosx-version-min=14.0",
-                "-std=c11",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "../consumer.c",
-                &game_lib,
-            ];
+            let mut consumer_args: Vec<String> =
+                ["-std=c11", "-Wall", "-Wextra", "-Werror", "../consumer.c"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+            consumer_args.push(tools.import_library(&game_lib));
             if format == Format::Object {
-                consumer_args.push(&runtime_lib);
+                consumer_args.push(runtime_lib.clone());
             }
+            consumer_args.extend(tools.linker_args(target));
+            consumer_args.extend(tools.loader_args(target));
+            consumer_args.extend(["-o".into(), consumer_name.clone()]);
+            tools.clang(&folder, target, &consumer_args)?;
+            let mut dependencies = vec![consumer_name.as_str()];
             if format == Format::Shared {
-                consumer_args.push("-Wl,-rpath,@loader_path");
+                dependencies.push(&game_lib);
+                if !full_lto {
+                    dependencies.push(&runtime_lib);
+                }
             }
-            consumer_args.extend(["-o", "consumer"]);
-            command(&folder, &format!("{bin}/clang"), &consumer_args)?;
-            let closure_args: Vec<&str> = if full_lto {
-                vec!["-L", &game_lib, "consumer"]
-            } else if format == Format::Shared {
-                vec!["-L", &runtime_lib, &game_lib, "consumer"]
-            } else {
-                vec!["-L", "consumer"]
-            };
-            let closure = command(&folder, &tools.otool, &closure_args)?;
-            if closure.contains("/opt/local/") || closure.contains("/usr/local/") {
-                return Err("unapproved link closure".to_owned());
-            }
+            let closure = tools.dependencies(&folder, &dependencies)?;
             write(&folder, "dependencies.txt", closure)?;
             slices.push(format!(
                 "{{\"architecture\":\"{arch}\",\"runtime_symbol\":\"{runtime_symbol}\"}}"
             ));
         }
         let artifacts = if full_lto {
-            vec![game_lib.as_str(), "consumer"]
+            vec![game_lib.as_str(), consumer_name.as_str()]
         } else {
-            vec![runtime_lib.as_str(), game_lib.as_str(), "consumer"]
+            vec![
+                runtime_lib.as_str(),
+                game_lib.as_str(),
+                consumer_name.as_str(),
+            ]
         };
-        for artifact in artifacts {
-            command(
-                &out,
-                &tools.lipo,
-                &[
-                    "-create",
-                    &format!("x86_64/{artifact}"),
-                    &format!("arm64/{artifact}"),
-                    "-output",
-                    artifact,
-                ],
-            )?;
-            command(
-                &out,
-                &tools.lipo,
-                &[artifact, "-verify_arch", "x86_64", "arm64"],
-            )?;
-        }
+        tools.assemble(&out, &artifacts)?;
         let mut hash_inputs = vec![
-            "-a".to_owned(),
-            "256".to_owned(),
             "source.t".to_owned(),
             "source-encoding.txt".to_owned(),
             "native-tool-lock.json".to_owned(),
@@ -452,12 +388,13 @@ pub fn build(
             "zeb_game.h".to_owned(),
             "consumer.c".to_owned(),
             game_lib.clone(),
-            "consumer".to_owned(),
+            consumer_name.clone(),
         ];
         if !full_lto {
             hash_inputs.push(runtime_lib.clone());
         }
-        for arch in ["x86_64", "arm64"] {
+        for target in host.slices() {
+            let arch = target.arch();
             if full_lto {
                 for name in [
                     "game.ll",
@@ -480,7 +417,8 @@ pub fn build(
             }
         }
         if full_lto {
-            for arch in ["x86_64", "arm64"] {
+            for target in host.slices() {
+                let arch = target.arch();
                 for name in [
                     "runtime.bc",
                     "runtime.lto.o",
@@ -491,9 +429,14 @@ pub fn build(
                 }
             }
         }
-        let hashes = command(
+        if host.is_windows() && format == Format::Shared {
+            hash_inputs.push(tools.import_library(&game_lib));
+            if !full_lto {
+                hash_inputs.push(tools.import_library(&runtime_lib));
+            }
+        }
+        let hashes = zebc::digest::sums(
             &out,
-            "/usr/bin/shasum",
             &hash_inputs.iter().map(String::as_str).collect::<Vec<_>>(),
         )?;
         write(&out, "SHA256SUMS", hashes)?;
@@ -504,8 +447,19 @@ pub fn build(
             "linked-object"
         };
         let runtime_artifact = if full_lto { &game_lib } else { &runtime_lib };
+        let bundle_target = host.bundle_name();
+        let deployment = if host.is_macos() { "14.0" } else { "host" };
+        let imports = if host.is_windows() && format == Format::Shared {
+            format!(
+                ",\"game_import\":\"{}\",\"runtime_import\":\"{}\"",
+                tools.import_library(&game_lib),
+                tools.import_library(runtime_artifact)
+            )
+        } else {
+            String::new()
+        };
         let manifest = format!(
-            "{{\"schema\":1,\"status\":\"complete\",\"profile\":\"{profile}\",\"target\":\"macos-universal\",\"deployment\":\"14.0\",\"optimization\":\"{}\",\"identity\":\"{identity}\",\"game_entry\":\"{symbol}\",\"abi_version\":{version},\"argument_count\":{arity},\"runtime\":\"{runtime_artifact}\",\"game\":\"{game_lib}\",\"consumer\":\"consumer\",\"slices\":[{}],\"lto\":\"{lto_mode}\",\"stack_report_scope\":\"{stack_scope}\",\"qualified\":false,\"adventure_game\":false}}\n",
+            "{{\"schema\":1,\"status\":\"complete\",\"profile\":\"{profile}\",\"target\":\"{bundle_target}\",\"deployment\":\"{deployment}\",\"optimization\":\"{}\",\"identity\":\"{identity}\",\"game_entry\":\"{symbol}\",\"abi_version\":{version},\"argument_count\":{arity},\"runtime\":\"{runtime_artifact}\",\"game\":\"{game_lib}\",\"consumer\":\"{consumer_name}\"{imports},\"slices\":[{}],\"lto\":\"{lto_mode}\",\"stack_report_scope\":\"{stack_scope}\",\"qualified\":false,\"adventure_game\":false}}\n",
             if optimize { "O2" } else { "O0" },
             slices.join(",")
         );
@@ -531,7 +485,6 @@ fn compile_runtime_bitcode(
     rustc: &str,
     tools: &Toolchain,
 ) -> Result<(), String> {
-    let bin = &tools.bin;
     command(
         folder,
         rustc,
@@ -554,13 +507,16 @@ fn compile_runtime_bitcode(
     )?;
     command(
         folder,
-        &format!("{bin}/opt"),
+        &tools.tool("opt"),
         &["-passes=verify", "-disable-output", "runtime.bc"],
     )?;
     Ok(())
 }
 
 fn full_link(folder: &Path, target: Target, game: &str, tools: &Toolchain) -> Result<(), String> {
+    if !target.is_macos() {
+        return portable_full_link(folder, target, game, tools);
+    }
     let bin = &tools.bin;
     let sdk = tools.sdk.as_str();
     let common = [
@@ -576,7 +532,7 @@ fn full_link(folder: &Path, target: Target, game: &str, tools: &Toolchain) -> Re
     for (input, output) in [("runtime.bc", "runtime.lto.o"), ("game.ll", "game.lto.o")] {
         let mut args = common.to_vec();
         args.extend(["-c", input, "-o", output]);
-        command(folder, &format!("{bin}/clang"), &args)?;
+        command(folder, &tools.tool("clang"), &args)?;
     }
     let linker = format!("-fuse-ld={bin}/ld64.lld");
     let install_name = format!("-Wl,-install_name,@rpath/{game}");
@@ -591,11 +547,11 @@ fn full_link(folder: &Path, target: Target, game: &str, tools: &Toolchain) -> Re
         "-o",
         "lto-optimized.bc",
     ]);
-    command(folder, &format!("{bin}/clang"), &args)?;
+    command(folder, &tools.tool("clang"), &args)?;
     let optimized = "lto-optimized.bc";
     command(
         folder,
-        &format!("{bin}/opt"),
+        &tools.tool("opt"),
         &["-passes=verify", "-disable-output", optimized],
     )?;
     command(
@@ -607,7 +563,7 @@ fn full_link(folder: &Path, target: Target, game: &str, tools: &Toolchain) -> Re
     // module. The final native link consumes this exact object, without LTO.
     let mut native = common[..common.len() - 1].to_vec();
     native.extend(["-fstack-usage", "-c", optimized, "-o", "game-final.o"]);
-    command(folder, &format!("{bin}/clang"), &native)?;
+    command(folder, &tools.tool("clang"), &native)?;
     let stack = fs::read(folder.join("game-final.su"))
         .map_err(|e| format!("missing final frame report: {e}"))?;
     if stack.is_empty() {
@@ -624,7 +580,7 @@ fn full_link(folder: &Path, target: Target, game: &str, tools: &Toolchain) -> Re
         "-o",
         game,
     ]);
-    command(folder, &format!("{bin}/clang"), &native_link)?;
+    command(folder, &tools.tool("clang"), &native_link)?;
     let sections = command(folder, &tools.otool, &["-l", "game-final.o", game])?;
     write(folder, "lto-sections.txt", sections)?;
     let closure = command(folder, &tools.otool, &["-L", game])?;
@@ -640,4 +596,102 @@ fn full_link(folder: &Path, target: Target, game: &str, tools: &Toolchain) -> Re
         }
     }
     write(folder, "lto-dependencies.txt", closure)
+}
+
+fn portable_full_link(
+    folder: &Path,
+    target: Target,
+    game: &str,
+    tools: &Toolchain,
+) -> Result<(), String> {
+    for (input, output) in [("runtime.bc", "runtime.lto.o"), ("game.ll", "game.lto.o")] {
+        tools.clang(
+            folder,
+            target,
+            &[
+                "-O2".into(),
+                "-flto=full".into(),
+                "-c".into(),
+                input.into(),
+                "-o".into(),
+                output.into(),
+            ],
+        )?;
+    }
+    let mut args = tools.shared_args(target, game);
+    args.extend([
+        "-O2".into(),
+        "-flto=full".into(),
+        "game.lto.o".into(),
+        "runtime.lto.o".into(),
+        if target.is_windows() {
+            "-Wl,/lldsavetemps".into()
+        } else {
+            "-Wl,--save-temps".into()
+        },
+        "-o".into(),
+        game.into(),
+    ]);
+    tools.clang(folder, target, &args)?;
+    let candidates = fs::read_dir(folder)
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().ends_with(".opt.bc"))
+        })
+        .collect::<Vec<_>>();
+    if candidates.len() != 1 {
+        return Err(format!(
+            "expected one full-LTO optimized module, found {}",
+            candidates.len()
+        ));
+    }
+    fs::copy(&candidates[0], folder.join("lto-optimized.bc")).map_err(|e| e.to_string())?;
+    command(
+        folder,
+        &tools.tool("opt"),
+        &["-passes=verify", "-disable-output", "lto-optimized.bc"],
+    )?;
+    command(
+        folder,
+        &tools.tool("llvm-dis"),
+        &["lto-optimized.bc", "-o", "lto-optimized.ll"],
+    )?;
+    tools.clang(
+        folder,
+        target,
+        &[
+            "-O2".into(),
+            "-fstack-usage".into(),
+            "-c".into(),
+            "lto-optimized.bc".into(),
+            "-o".into(),
+            "game-final.o".into(),
+        ],
+    )?;
+    let stack = fs::read(folder.join("game-final.su"))
+        .map_err(|e| format!("missing final frame report: {e}"))?;
+    if stack.is_empty() {
+        return Err("empty final frame report".into());
+    }
+    fs::rename(folder.join("game-final.su"), folder.join("game-stack.su"))
+        .map_err(|e| e.to_string())?;
+    let mut native = tools.shared_args(target, game);
+    native.extend(["game-final.o".into(), "-o".into(), game.into()]);
+    tools.clang(folder, target, &native)?;
+    let sections = command(
+        folder,
+        &tools.tool("llvm-readobj"),
+        &["--sections", "game-final.o", game],
+    )?;
+    write(folder, "lto-sections.txt", sections)?;
+    write(
+        folder,
+        "lto-dependencies.txt",
+        tools.dependencies(folder, &[game])?,
+    )
 }

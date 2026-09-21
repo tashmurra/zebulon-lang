@@ -641,6 +641,12 @@ fn declared_entities(ast: &Ast) -> Vec<Entity> {
 
 impl Manifest {
     /// Every C name this bundle is supposed to define.
+    pub fn set_target(&mut self, target: zeb_frontend::llvm::Target) {
+        self.game = format!("libzeb_game_{}.{}", self.identity, target.shared_ext());
+        let stem = self.runtime.strip_suffix(".dylib").unwrap_or(&self.runtime);
+        self.runtime = format!("{stem}.{}", target.shared_ext());
+        self.targets = target.slices().iter().map(|t| t.name()).collect();
+    }
     pub fn exported_names(&self) -> Vec<String> {
         EXPORTS
             .iter()
@@ -711,6 +717,25 @@ impl Manifest {
                     ("symbol".into(), Json::str(&self.symbol)),
                     ("game".into(), Json::str(&self.game)),
                     ("runtime".into(), Json::str(&self.runtime)),
+                    (
+                        "consumer".into(),
+                        Json::str(if self.targets.contains(&"windows-x86_64") {
+                            "consumer.exe"
+                        } else {
+                            "consumer"
+                        }),
+                    ),
+                    (
+                        "import_libraries".into(),
+                        Json::Arr(if self.targets.contains(&"windows-x86_64") {
+                            vec![
+                                Json::str(format!("{}.lib", self.game)),
+                                Json::str(format!("{}.lib", self.runtime)),
+                            ]
+                        } else {
+                            vec![]
+                        }),
+                    ),
                     ("optimize".into(), Json::Bool(self.optimize)),
                     (
                         "targets".into(),

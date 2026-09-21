@@ -1,12 +1,12 @@
-//! macOS universal object-program bundles using the common LLVM emitter.
-use std::{fs, path::Path, time::Duration};
+//! Host-native object-program bundles using the common LLVM emitter.
+use std::{fs, path::Path};
 use zeb_frontend::{
     llvm::{self, Target},
     parser::{Ast, Syntax},
     source::Source,
 };
 use zebc::manifest;
-use zebc::{process::run, toolchain::Toolchain};
+use zebc::toolchain::Toolchain;
 
 const RUNTIME: &str = include_str!("../../zeb-runtime/src/lib.rs");
 const GRAMMAR: &str = include_str!("../../zeb-runtime/src/grammar.rs");
@@ -45,25 +45,10 @@ fn runtime_identity() -> String {
     ])
 }
 
-fn command(dir: &Path, program: &str, args: &[&str]) -> Result<String, String> {
-    run(dir, program, args, Duration::from_secs(60))
-}
-/// Read a tool's output when that output is the answer rather than a log: a
-/// symbol table is as large as the runtime's symbols, which the log cap is not
-/// sized for.
-fn listing(dir: &Path, program: &str, args: &[&str]) -> Result<String, String> {
-    zebc::process::run_bounded(
-        dir,
-        program,
-        args,
-        Duration::from_secs(60),
-        zebc::process::SYMBOL_LIMIT,
-    )
-}
 fn write(dir: &Path, name: &str, data: impl AsRef<[u8]>) -> Result<(), String> {
     fs::write(dir.join(name), data).map_err(|e| e.to_string())
 }
-fn symbol(names: &str, readable: &str, method: &str) -> Result<String, String> {
+fn symbol(names: &str, readable: &str, method: &str, target: Target) -> Result<String, String> {
     let suffix = format!("::native_objects::{method}");
     let matches = names
         .lines()
@@ -71,7 +56,7 @@ fn symbol(names: &str, readable: &str, method: &str) -> Result<String, String> {
         .filter_map(|(raw, demangled)| {
             demangled
                 .ends_with(&suffix)
-                .then(|| raw.split_whitespace().last()?.strip_prefix('_'))
+                .then(|| raw.split_whitespace().last().map(|s| target.ir_symbol(s)))
                 .flatten()
         })
         .collect::<Vec<_>>();
@@ -103,7 +88,7 @@ pub enum Program {
     },
 }
 
-fn entry(symbol: &str, program: &Program, cpu: &str, abi: u32) -> String {
+fn entry(symbol: &str, program: &Program, target_attributes: &str, abi: u32) -> String {
     // the memory model is a build option, so the entry selects it
     // before anything allocates. Under ownership the runtime keeps its default.
     let select_model = match program {
@@ -194,7 +179,7 @@ fn entry(symbol: &str, program: &Program, cpu: &str, abi: u32) -> String {
     };
     format!(
         r#"
-define i64 @{symbol}(i32 %abi, i64 %slot, i64 %objects, i64 %properties, i64 %output_limit) "target-cpu"="{cpu}" {{
+define i64 @{symbol}(i32 %abi, i64 %slot, i64 %objects, i64 %properties, i64 %output_limit) {target_attributes} {{
 entry:
   %version = icmp eq i32 %abi, {abi}
   br i1 %version, label %open, label %mismatch
@@ -285,91 +270,91 @@ success:
   %final_result = select i1 %owned_text, i64 9, i64 %result
   ret i64 %final_result
 }}
-define i32 @{symbol}_output_byte(i64 %slot, i64 %offset) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_output_byte(i64 %slot, i64 %offset) {target_attributes} {{
   %byte = call i32 @zeb_host_output_byte(i64 %slot, i64 %offset)
   ret i32 %byte
 }}
-define i64 @{symbol}_output_len(i64 %slot) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_output_len(i64 %slot) {target_attributes} {{
   %len = call i64 @zeb_host_output_len(i64 %slot)
   ret i64 %len
 }}
-define i64 @{symbol}_output_word(i64 %slot, i64 %offset) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_output_word(i64 %slot, i64 %offset) {target_attributes} {{
   %word = call i64 @zeb_host_output_word(i64 %slot, i64 %offset)
   ret i64 %word
 }}
-define i64 @{symbol}_event_len(i64 %slot) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_event_len(i64 %slot) {target_attributes} {{
   %len = call i64 @zeb_host_event_len(i64 %slot)
   ret i64 %len
 }}
-define i64 @{symbol}_event_word(i64 %slot, i64 %offset) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_event_word(i64 %slot, i64 %offset) {target_attributes} {{
   %word = call i64 @zeb_host_event_word(i64 %slot, i64 %offset)
   ret i64 %word
 }}
-define i32 @{symbol}_text_byte(i32 %literal, i64 %offset) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_text_byte(i32 %literal, i64 %offset) {target_attributes} {{
   %byte = call i32 @zeb_objects_text_byte(i32 %literal, i64 %offset)
   ret i32 %byte
 }}
-define i32 @{symbol}_poll(i64 %slot) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_poll(i64 %slot) {target_attributes} {{
   %code = call i32 @zeb_host_poll(i64 %slot)
   ret i32 %code
 }}
-define i32 @{symbol}_drained(i64 %slot) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_drained(i64 %slot) {target_attributes} {{
   %code = call i32 @zeb_host_drained(i64 %slot)
   ret i32 %code
 }}
-define i32 @{symbol}_reply_byte(i64 %slot, i32 %byte) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_reply_byte(i64 %slot, i32 %byte) {target_attributes} {{
   %code = call i32 @zeb_host_reply_byte(i64 %slot, i32 %byte)
   ret i32 %code
 }}
-define i32 @{symbol}_reply_action(i64 %slot, i32 %verb) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_reply_action(i64 %slot, i32 %verb) {target_attributes} {{
   %code = call i32 @zeb_host_reply_action(i64 %slot, i32 %verb)
   ret i32 %code
 }}
-define i32 @{symbol}_reply_value(i64 %slot, i32 %tag, i64 %payload) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_reply_value(i64 %slot, i32 %tag, i64 %payload) {target_attributes} {{
   %code = call i32 @zeb_host_reply_value(i64 %slot, i32 %tag, i64 %payload)
   ret i32 %code
 }}
-define i32 @{symbol}_reply_subject(i64 %slot, i64 %handle) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_reply_subject(i64 %slot, i64 %handle) {target_attributes} {{
   %code = call i32 @zeb_host_reply_subject(i64 %slot, i64 %handle)
   ret i32 %code
 }}
-define i32 @{symbol}_resume(i64 %slot) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_resume(i64 %slot) {target_attributes} {{
   %code = call i32 @zeb_host_resume(i64 %slot)
   ret i32 %code
 }}
-define i32 @{symbol}_close(i64 %slot) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_close(i64 %slot) {target_attributes} {{
   %code = call i32 @zeb_host_close(i64 %slot)
   ret i32 %code
 }}
-define i32 @{symbol}_reset(i64 %slot) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_reset(i64 %slot) {target_attributes} {{
   %code = call i32 @zeb_host_reset(i64 %slot)
   ret i32 %code
 }}
-define i32 @{symbol}_discard(i64 %slot) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_discard(i64 %slot) {target_attributes} {{
   %code = call i32 @zeb_host_discard(i64 %slot)
   ret i32 %code
 }}
-define i32 @{symbol}_finish(i64 %slot, i64 %outcome) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_finish(i64 %slot, i64 %outcome) {target_attributes} {{
   %code = call i32 @zeb_host_finish(i64 %slot, i64 %outcome)
   ret i32 %code
 }}
-define i64 @{symbol}_outcome(i64 %slot) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_outcome(i64 %slot) {target_attributes} {{
   %value = call i64 @zeb_host_outcome(i64 %slot)
   ret i64 %value
 }}
-define i64 @{symbol}_persistence(i64 %slot, i32 %op, i64 %value) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_persistence(i64 %slot, i32 %op, i64 %value) {target_attributes} {{
   %result = call i64 @zeb_host_persistence(i64 %slot, i32 %op, i64 %value)
   ret i64 %result
 }}
-define i32 @{symbol}_inspect(i64 %slot, i32 %kind, i64 %a, i64 %b) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_inspect(i64 %slot, i32 %kind, i64 %a, i64 %b) {target_attributes} {{
   %code = call i32 @zeb_host_inspect(i64 %slot, i32 %kind, i64 %a, i64 %b)
   ret i32 %code
 }}
-define i64 @{symbol}_result_len(i64 %slot) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_result_len(i64 %slot) {target_attributes} {{
   %len = call i64 @zeb_host_result_len(i64 %slot)
   ret i64 %len
 }}
-define i64 @{symbol}_result(i64 %slot, i64 %index) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_result(i64 %slot, i64 %index) {target_attributes} {{
   %value = call i64 @zeb_host_result(i64 %slot, i64 %index)
   ret i64 %value
 }}
@@ -434,7 +419,12 @@ fn consumer(described: &manifest::Manifest) -> Result<String, String> {
     Ok(format!(
         r#"#include "zeb_game.h"
 #include <inttypes.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <process.h>
+#else
 #include <pthread.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -452,11 +442,15 @@ static int quota(const char *text, uint64_t *value) {{
 /* Events are what an engine binds assets to; a console prints them only when
    asked, so a transcript stays readable. ZEB_EVENTS=1 turns them on. */
 static int SHOW_EVENTS = 0;
+#ifdef _WIN32
+static unsigned __stdcall worker(void *ignored) {{
+#else
 static void *worker(void *ignored) {{
+#endif
     (void)ignored;
     uint64_t result = {symbol}({abi}, SLOT, objects, properties, output_limit);
     {symbol}_finish(SLOT, result);
-    return NULL;
+    return 0;
 }}
 /* Print the semantic events a turn produced, beside its text ().
 
@@ -650,8 +644,13 @@ int main(int argc, char **argv) {{
     }}
     {{ const char *want = getenv("ZEB_EVENTS"); SHOW_EVENTS = want && want[0] == '2' ? 2 : want && want[0] == '1'; }}
     if ({symbol}_reset(SLOT) != 0) {{ fputs("cannot start a session\n", stderr); return 70; }}
+#ifdef _WIN32
+    uintptr_t thread = _beginthreadex(NULL, 0, worker, NULL, 0, NULL);
+    if (!thread) {{
+#else
     pthread_t thread;
     if (pthread_create(&thread, NULL, worker, NULL) != 0) {{
+#endif
         fputs("cannot start the session worker\n", stderr); return 70;
     }}
     int emitted = 0;
@@ -671,7 +670,12 @@ int main(int argc, char **argv) {{
         if (!answer()) return 74;
         if ({symbol}_result_len(SLOT) > 0) results();
     }}
+#ifdef _WIN32
+    WaitForSingleObject((HANDLE)thread, INFINITE);
+    CloseHandle((HANDLE)thread);
+#else
     pthread_join(thread, NULL);
+#endif
     if (!drain(&emitted)) return 74;
     uint64_t result = {symbol}_outcome(SLOT);
     {symbol}_discard(SLOT);
@@ -712,12 +716,11 @@ fn runtime_args(
     runtime: &str,
     out: &str,
     optimize: bool,
-    target: &str,
-    cpu: Target,
-    bin: &str,
+    target: Target,
+    tools: &Toolchain,
 ) -> Vec<String> {
-    [
-        "--edition=2024".to_owned(),
+    let mut args = vec![
+        "--edition=2024".into(),
         "--remap-path-prefix".into(),
         format!("{out}=zeb-runtime"),
         "--crate-name=zeb_runtime".into(),
@@ -725,20 +728,17 @@ fn runtime_args(
         "--cfg".into(),
         "feature=\"objects\"".into(),
         "--target".into(),
-        target.into(),
+        target.rust_triple().into(),
         "-C".into(),
-        format!("target-cpu={}", cpu.cpu()),
+        format!("target-cpu={}", target.cpu()),
         "-C".into(),
         format!("opt-level={}", if optimize { 2 } else { 0 }),
-        "-C".into(),
-        format!("linker={bin}/clang"),
-        "-C".into(),
-        format!("link-arg=-Wl,-install_name,@rpath/{runtime}"),
         "../runtime.rs".into(),
         "-o".into(),
         runtime.into(),
-    ]
-    .into()
+    ];
+    args.extend(tools.rust_args(target, runtime));
+    args
 }
 
 pub fn build(
@@ -748,9 +748,7 @@ pub fn build(
     optimize: bool,
     cache: Option<&Path>,
 ) -> Result<(), String> {
-    if !cfg!(target_os = "macos") {
-        return Err("object builds currently require macOS".to_owned());
-    }
+    let host = Target::host()?;
     if source.byte_len() > u32::MAX as usize {
         return Err("object consumer requires source offsets within u32".to_owned());
     }
@@ -791,8 +789,10 @@ pub fn build(
             declared("main", 0).ok_or("object bundle requires main() with no parameters")?,
         )
     };
-    let modules = [Target::MacX86_64, Target::MacArm64]
-        .into_iter()
+    let modules = host
+        .slices()
+        .iter()
+        .copied()
         .map(|target| {
             llvm::emit_objects(ast, target)
                 .map_err(|d| format!("{} at byte {}: {}", d.code, d.byte, d.message))
@@ -803,8 +803,6 @@ pub fn build(
     let result = (|| {
         let tools = Toolchain::resolve(&out)?;
         tools.record(&out)?;
-        let bin = tools.bin.as_str();
-        let sdk = tools.sdk.as_str();
         let rustc = tools.rustc.clone();
         write(&out, "source.t", source.original_bytes())?;
         write(
@@ -837,47 +835,26 @@ pub fn build(
          * it is the same library, byte for byte, which is what makes it worth
          * building once.
          */
+        let recipes = host
+            .slices()
+            .iter()
+            .map(|&target| runtime_args("RUNTIME", "OUTPUT", optimize, target, &tools).join("\n"))
+            .collect::<Vec<_>>()
+            .join("\n");
         write(
             &out,
             "runtime-identity.txt",
             zebc::runtime_cache::identity(&[
                 PROFILE,
-                "MACOSX_DEPLOYMENT_TARGET=14.0",
-                sdk,
                 &runtime_identity(),
                 &tools.lock_json,
                 &tools.profile_json,
-                &runtime_args(
-                    "RUNTIME",
-                    "OUTPUT",
-                    optimize,
-                    "x86_64-apple-darwin",
-                    Target::MacX86_64,
-                    bin,
-                )
-                .join("\n"),
-                &runtime_args(
-                    "RUNTIME",
-                    "OUTPUT",
-                    optimize,
-                    "aarch64-apple-darwin",
-                    Target::MacArm64,
-                    bin,
-                )
-                .join("\n"),
+                &recipes,
+                include_str!("platform.rs"),
                 &tools.rustc,
             ]),
         )?;
-        let hash = command(
-            &out,
-            "/usr/bin/shasum",
-            &["-a", "256", "runtime-identity.txt"],
-        )?;
-        let runtime_digest = hash
-            .split_whitespace()
-            .next()
-            .ok_or("missing runtime digest")?
-            .to_owned();
+        let runtime_digest = zebc::digest::file(&out.join("runtime-identity.txt"))?;
         write(
             &out,
             "identity.txt",
@@ -886,11 +863,8 @@ pub fn build(
                 modules[0]
             ),
         )?;
-        let hash = command(&out, "/usr/bin/shasum", &["-a", "256", "identity.txt"])?;
-        let identity = hash
-            .split_whitespace()
-            .next()
-            .ok_or("missing bundle digest")?;
+        let identity = zebc::digest::file(&out.join("identity.txt"))?;
+        let identity = identity.as_str();
         if identity.len() != 64 || !identity.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("invalid bundle digest".to_owned());
         }
@@ -900,7 +874,7 @@ pub fn build(
         // the bundle describes its own surface, and the header is
         // rendered from that description rather than written beside it. A name
         // that appears in one appears in both or in neither.
-        let described = manifest::describe(
+        let mut described = manifest::describe(
             ast,
             identity,
             &runtime_digest,
@@ -930,6 +904,7 @@ pub fn build(
             PROFILE,
             ABI,
         );
+        described.set_target(host);
         manifest::validate(&described)?;
         let exported = described.symbol.clone();
         let game = described.game.clone();
@@ -937,13 +912,9 @@ pub fn build(
         write(&out, "manifest.json", described.json().render())?;
         write(&out, "zeb_game.h", described.header())?;
         write(&out, "consumer.c", consumer(&described)?)?;
-        for ((arch, rust_target, target), mut module) in [
-            ("x86_64", "x86_64-apple-darwin", Target::MacX86_64),
-            ("arm64", "aarch64-apple-darwin", Target::MacArm64),
-        ]
-        .into_iter()
-        .zip(modules)
-        {
+        let consumer_name = host.executable("consumer");
+        for (&target, mut module) in host.slices().iter().zip(modules) {
+            let arch = target.arch();
             let dir = out.join(arch);
             fs::create_dir(&dir).map_err(|e| e.to_string())?;
             let cached = cache.map(|root| root.join(&runtime_digest).join(arch));
@@ -952,21 +923,11 @@ pub fn build(
                 None => false,
             };
             if !hit {
-                let mut env_args = vec![
-                    "MACOSX_DEPLOYMENT_TARGET=14.0".to_owned(),
-                    format!("SDKROOT={sdk}"),
-                    rustc.clone(),
-                ];
-                env_args.extend(runtime_args(
-                    &runtime,
-                    &out.to_string_lossy(),
-                    optimize,
-                    rust_target,
-                    target,
-                    bin,
-                ));
-                let env_args: Vec<&str> = env_args.iter().map(String::as_str).collect();
-                let rust_log = command(&dir, "/usr/bin/env", &env_args)?;
+                let rust_log = tools.run(
+                    &dir,
+                    &rustc,
+                    &runtime_args(&runtime, &out.to_string_lossy(), optimize, target, &tools),
+                )?;
                 write(&dir, "rust-build.txt", rust_log)?;
                 if let Some(path) = &cached {
                     zebc::runtime_cache::publish(path, &dir, &runtime)?;
@@ -975,19 +936,11 @@ pub fn build(
             if cache.is_some() {
                 eprintln!("runtime cache {arch}: {}", if hit { "hit" } else { "miss" });
             }
-            let names = listing(
-                &dir,
-                &format!("{bin}/llvm-nm"),
-                &["--defined-only", &runtime],
-            )?;
-            let readable = listing(
-                &dir,
-                &format!("{bin}/llvm-nm"),
-                &["--defined-only", "--demangle", &runtime],
-            )?;
+            let names = tools.symbols(&dir, &runtime, false)?;
+            let readable = tools.symbols(&dir, &runtime, true)?;
             module += "\ndeclare i32 @zeb_objects_text_byte(i32, i64)\ndeclare i32 @zeb_objects_output_byte(i64)\ndeclare i32 @zeb_host_reset(i64)\ndeclare i32 @zeb_host_discard(i64)\ndeclare i32 @zeb_host_poll(i64)\ndeclare i32 @zeb_host_output_byte(i64, i64)\ndeclare i64 @zeb_host_output_len(i64)\ndeclare i64 @zeb_host_output_word(i64, i64)\ndeclare i64 @zeb_host_event_len(i64)\ndeclare i64 @zeb_host_event_word(i64, i64)\ndeclare i32 @zeb_host_drained(i64)\ndeclare i32 @zeb_host_reply_byte(i64, i32)\ndeclare i32 @zeb_host_reply_action(i64, i32)\ndeclare i32 @zeb_host_reply_value(i64, i32, i64)\ndeclare i32 @zeb_host_reply_subject(i64, i64)\ndeclare i32 @zeb_host_resume(i64)\ndeclare i32 @zeb_host_close(i64)\ndeclare i32 @zeb_host_finish(i64, i64)\ndeclare i64 @zeb_host_outcome(i64)\ndeclare i32 @zeb_host_inspect(i64, i32, i64, i64)\ndeclare i64 @zeb_host_result_len(i64)\ndeclare i64 @zeb_host_result(i64, i64)\n";
             module += "\ndeclare i64 @zeb_host_persistence(i64, i32, i64)\n";
-            let mut boundary = entry(&exported, &program, target.cpu(), ABI);
+            let mut boundary = entry(&exported, &program, target.function_attributes(), ABI);
             let mut schema_calls = String::new();
             for (i, chunk) in identity.as_bytes().as_chunks::<16>().0.iter().enumerate() {
                 let hex = std::str::from_utf8(chunk).map_err(|e| e.to_string())?;
@@ -1012,7 +965,7 @@ pub fn build(
                 "text_byte",
                 "output_byte",
             ] {
-                let name = symbol(&names, &readable, method)?;
+                let name = symbol(&names, &readable, method, target)?;
                 module = module.replace(&format!("@zeb_objects_{method}"), &format!("@{name}"));
             }
             for method in [
@@ -1038,78 +991,56 @@ pub fn build(
                 "host_result_len",
                 "host_result",
             ] {
-                let name = symbol(&names, &readable, method)?;
+                let name = symbol(&names, &readable, method, target)?;
                 module = module.replace(&format!("@zeb_{method}"), &format!("@{name}"));
             }
-            write(&dir, "game.ll", module)?;
-            let clang = format!("{bin}/clang");
-            let triple = format!("{arch}-apple-macos14.0");
-            let flag = if optimize { "-O2" } else { "-O0" };
-            let log = command(
-                &dir,
-                &clang,
-                &[
-                    "-target",
-                    &triple,
-                    "-isysroot",
-                    sdk,
-                    target.clang_cpu(),
-                    flag,
-                    "-dynamiclib",
-                    "game.ll",
-                    &runtime,
-                    &format!("-Wl,-install_name,@rpath/{game}"),
-                    "-Wl,-rpath,@loader_path",
-                    "-o",
-                    &game,
-                ],
-            )?;
+            if target.is_windows() {
+                // Every external declaration here is a runtime function, not an LLVM intrinsic.
+                module = module
+                    .replace("declare i32 @", "declare dllimport i32 @")
+                    .replace("declare i64 @", "declare dllimport i64 @");
+            }
+            write(&dir, "game.ll", zebc::platform::export_ir(module, target))?;
+            let mut args = tools.shared_args(target, &game);
+            args.extend([
+                if optimize { "-O2".into() } else { "-O0".into() },
+                "game.ll".into(),
+                tools.import_library(&runtime),
+                "-o".into(),
+                game.clone(),
+            ]);
+            let log = tools.clang(&dir, target, &args)?;
             write(&dir, "game-build.txt", log)?;
-            let log = command(
-                &dir,
-                &clang,
-                &[
-                    "-target",
-                    &triple,
-                    "-isysroot",
-                    sdk,
-                    target.clang_cpu(),
-                    "-std=c11",
-                    "-Wall",
-                    "-Wextra",
-                    "-Werror",
-                    "../consumer.c",
-                    &game,
-                    "-Wl,-rpath,@loader_path",
-                    "-o",
-                    "consumer",
-                ],
-            )?;
+            let mut args: Vec<String> =
+                ["-std=c11", "-Wall", "-Wextra", "-Werror", "../consumer.c"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+            args.extend([
+                tools.import_library(&game),
+                "-o".into(),
+                consumer_name.clone(),
+            ]);
+            if !target.is_windows() {
+                args.push("-pthread".into());
+            }
+            args.extend(tools.loader_args(target));
+            args.extend(tools.linker_args(target));
+            let log = tools.clang(&dir, target, &args)?;
             write(&dir, "consumer-build.txt", log)?;
-        }
-        for name in [&game, &runtime, "consumer"] {
-            command(
-                &out,
-                &format!("{bin}/llvm-lipo"),
-                &[
-                    "-create",
-                    &format!("x86_64/{name}"),
-                    &format!("arm64/{name}"),
-                    "-output",
-                    name,
-                ],
+            write(
+                &dir,
+                "dependencies.txt",
+                tools.dependencies(&dir, &[&game, &runtime, &consumer_name])?,
             )?;
         }
+        tools.assemble(&out, &[&game, &runtime, &consumer_name])?;
         // the manifest may not name a function the bundle does not
         // define. A description that is merely plausible is worse than none —
         // a binding generator reads it and produces code that links against
         // nothing. So it is checked against the built library's own symbols,
         // read as data rather than as a log.
-        let symbols = listing(
-            &out,
-            &format!("{bin}/llvm-nm"),
-            &["--defined-only", "--extern-only", &game],
-        )?;
+        let symbols = tools.exports(&out, &game)?;
         write(&out, "manifest-symbols.txt", &symbols)?;
         let missing = manifest::missing_exports(&described, &symbols);
         if !missing.is_empty() {
@@ -1123,7 +1054,7 @@ pub fn build(
             &out,
             "BUILD.txt",
             format!(
-                "built\nprofile={PROFILE}\ngame={game}\nruntime={runtime}\nconsumer=consumer\nmanifest=manifest.json\nexecution=not-run-by-builder\nqualification=not-claimed\n"
+                "built\nprofile={PROFILE}\ngame={game}\nruntime={runtime}\nconsumer={consumer_name}\nmanifest=manifest.json\nexecution=not-run-by-builder\nqualification=not-claimed\n"
             ),
         )?;
         Ok(())

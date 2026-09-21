@@ -6,11 +6,14 @@ The `zebc` compiler, frontend, runtime and generic collection helpers are includ
 
 ## Requirements
 
-- Rust **1.98.1**, including the `x86_64-apple-darwin` and `aarch64-apple-darwin` standard libraries. The checked-in rustup configuration selects them.
-- For native builds: Intel or Apple Silicon macOS, an Apple macOS SDK selected with Xcode's developer tools, and **LLVM 22.1.8** with Clang, LLD, `opt`, `llvm-config`, `llvm-ar`, `llvm-nm`, `llvm-dis`, `llvm-objdump` and `llvm-lipo`.
-- Python 3 for the embedding example and repository checks; Python 3.12+ plus CMake/Ninja for the optional CI LLVM bootstrap.
+- Rust **1.98.1**. The checked-in rustup configuration selects it for compiler/runtime builds on macOS, Linux and Windows.
+- For native builds: **LLVM 22.1.8** with Clang, LLD, `opt`, `llvm-config`, `llvm-ar`, `llvm-nm`, `llvm-dis`, `llvm-objdump` and `llvm-readobj`.
+- macOS additionally requires an Apple macOS SDK, `llvm-lipo`, and both Rust targets: `rustup target add x86_64-apple-darwin aarch64-apple-darwin`.
+- Linux x86-64 requires the host C/C++ development toolchain (including libc headers and startup libraries).
+- Windows x86-64 requires Visual Studio C++ Build Tools and a Windows SDK. Run from an **x64 Developer PowerShell** so `INCLUDE` and `LIB` are configured.
+- Python 3 for repository checks and embedding examples; Python 3.12+ for the optional prebuilt LLVM bootstrap.
 
-Native output is universal macOS arm64/x86-64 with a macOS 14.0 deployment target. Building a slice does not establish that it ran on that architecture or on the minimum OS. Local validation has run on an Intel Mac; the Apple Silicon CI workflow must pass before treating that host as execution-verified. Windows, Linux and iOS native output are not provided by this distribution.
+Each compiler builds for its host OS. macOS output is universal arm64/x86-64 with deployment target 14.0; Linux output uses the x86-64 GNU/Linux ABI; Windows output uses the x86-64 MSVC ABI. Cross-OS builds, Linux/Windows ARM64, musl, MinGW and iOS are not supported. Build success alone does not establish execution on another architecture or compatibility with older operating systems.
 
 LLVM may be installed anywhere. Put the required `llvm-config` on `PATH`, or set `ZEB_LLVM_CONFIG` to its executable. The compiler obtains all LLVM tools from that installation. There is no dependency on a particular package manager.
 
@@ -21,9 +24,11 @@ LLVM may be installed anywhere. Put the required `llvm-config` on `PATH`, or set
 | macOS SDK | `SDKROOT`, otherwise `xcrun --sdk macosx --show-sdk-path` |
 | Apple tools | `DEVELOPER_DIR` when set, otherwise the developer tools selected by the system |
 
-An invalid explicit setting is an error. Tool versions and both Rust target libraries are checked before native compilation. Ordinary source checking and Rust unit tests do not require LLVM. [Toolchain setup and CI](docs/development.md#native-toolchain) explains how to obtain the pinned LLVM version.
+An invalid explicit setting is an error. Tool versions and the required Rust target libraries are checked before native compilation. Ordinary source checking and Rust unit tests do not require LLVM. [Toolchain setup and CI](docs/development.md#native-toolchain) explains how to obtain the pinned LLVM version.
 
 ## Build and install
+
+CI builds and tests the Rust workspace and generated native programs on Linux x86-64, Windows x86-64 and Apple Silicon macOS. The macOS job combines Intel and Apple Silicon compiler builds into the `zebc-macos-universal` artifact. Both that compiler and its generated macOS programs are universal; CI executes only Apple Silicon, so Intel execution is not covered. Linux and Windows compiler artifacts are x86-64. Download them from the successful run’s Artifacts section in GitHub Actions. After extracting on macOS or Linux, run `chmod +x zebc` to restore executable permission. Native builds require the external prerequisites above.
 
 From the repository root:
 
@@ -52,7 +57,7 @@ cargo run --locked -p zebc -- build examples/scalar.t --model ownership --emit s
 ./build/scalar/consumer 20
 ```
 
-The consumer prints `41`. Output directories must be new: choose another output name to repeat a build. The compiler refuses to overwrite an existing bundle. A shared bundle contains native libraries, a generated header, a manifest and a working C consumer.
+On Windows, use `build/scalar/consumer.exe 20`. The consumer prints `41`. Output directories must be new: choose another output name to repeat a build. The compiler refuses to overwrite an existing bundle. A shared bundle contains native libraries, a generated header, a manifest and a working C consumer.
 
 ## A host-driven world
 
@@ -89,7 +94,7 @@ With the native prerequisites configured, explicitly run the native suite:
 cargo test -p zebc --locked -- --ignored --test-threads=1
 ```
 
-Native tests build both architecture slices and execute the host slice. They fail on missing prerequisites. They are excluded from the default suite because they compile and link native programs, not because their results are optional for native changes. Test output and build identities remain local.
+Native tests build the host target set and execute the host slice; macOS builds both architecture slices. They fail on missing prerequisites. They are excluded from the default suite because they compile and link native programs, not because their results are optional for native changes. Test output and build identities remain local.
 
 ## Licence
 

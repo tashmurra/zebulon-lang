@@ -38,7 +38,7 @@ fn build(dir: &Path, name: &str, source: &str, format: &str, opt: &str, lto: boo
 fn result(bundle: &Path, args: &[&str]) -> (i32, String, String) {
     capture(
         bundle,
-        bundle.join("consumer").to_str().unwrap(),
+        bundle.join(common::exe("consumer")).to_str().unwrap(),
         args,
         "",
         Duration::from_secs(15),
@@ -46,7 +46,7 @@ fn result(bundle: &Path, args: &[&str]) -> (i32, String, String) {
 }
 
 #[test]
-#[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and the macOS SDK"]
+#[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and host native prerequisites"]
 fn link_modes_lto_and_independent_consumers() {
     let tmp = TempDir::new("link-modes");
     for format in ["obj", "static", "shared"] {
@@ -88,7 +88,7 @@ fn link_modes_lto_and_independent_consumers() {
         let manifest = fs::read_to_string(bundle.join("manifest.json")).unwrap();
         assert!(manifest.contains("\"lto\":\"full\""));
         assert!(manifest.contains("linked-lto-object"));
-        for arch in ["x86_64", "arm64"] {
+        for arch in common::arches() {
             let slice = bundle.join(arch);
             let ir = fs::read_to_string(slice.join("lto-optimized.ll")).unwrap();
             assert!(
@@ -107,19 +107,18 @@ fn link_modes_lto_and_independent_consumers() {
                 assert_eq!(result(&slice, &args), (0, expected.into(), "".into()));
             }
         }
-        let sums = capture(
-            &bundle,
-            "/usr/bin/shasum",
-            &["-a", "256", "-c", "SHA256SUMS"],
-            "",
-            Duration::from_secs(30),
-        );
-        assert_eq!(sums.0, 0, "{}{}", sums.1, sums.2);
+        for line in fs::read_to_string(bundle.join("SHA256SUMS"))
+            .unwrap()
+            .lines()
+        {
+            let (digest, name) = line.split_once("  ").unwrap();
+            assert_eq!(zebc::digest::file(&bundle.join(name)).unwrap(), digest);
+        }
     }
 }
 
 #[test]
-#[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and the macOS SDK"]
+#[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and host native prerequisites"]
 fn world_rollback_and_process_boundary_persistence() {
     let tmp = TempDir::new("world-state");
     let bundle = build(
@@ -133,7 +132,7 @@ fn world_rollback_and_process_boundary_persistence() {
     let play = |commands: &str| {
         let answer = capture(
             &bundle,
-            bundle.join("consumer").to_str().unwrap(),
+            bundle.join(common::exe("consumer")).to_str().unwrap(),
             &[],
             commands,
             Duration::from_secs(30),
@@ -201,7 +200,7 @@ fn world_rollback_and_process_boundary_persistence() {
 }
 
 #[test]
-#[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and the macOS SDK"]
+#[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and host native prerequisites"]
 fn scalar_specialization_preserves_values_errors_and_fallbacks() {
     let tmp = TempDir::new("specialization");
     let cases: &[(&str, &str, &str, i32, &[&str])] = &[
@@ -292,7 +291,7 @@ fn scalar_specialization_preserves_values_errors_and_fallbacks() {
             expected,
             "{name}"
         );
-        for arch in ["x86_64", "arm64"] {
+        for arch in common::arches() {
             let ir = fs::read_to_string(bundle.join(arch).join("game.ll")).unwrap();
             for marker in markers {
                 assert!(ir.contains(marker), "{name} {arch}: missing {marker}");
@@ -302,7 +301,7 @@ fn scalar_specialization_preserves_values_errors_and_fallbacks() {
 }
 
 #[test]
-#[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and the macOS SDK"]
+#[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and host native prerequisites"]
 fn root_pruning_preserves_recursive_and_error_outcomes() {
     let tmp = TempDir::new("roots");
     type RootCase = (
@@ -346,7 +345,7 @@ fn root_pruning_preserves_recursive_and_error_outcomes() {
                     opt,
                     false,
                 );
-                for arch in ["x86_64", "arm64"] {
+                for arch in common::arches() {
                     let path = if format == "exe" {
                         bundle.join(format!("{arch}.ll"))
                     } else {
@@ -370,11 +369,11 @@ fn root_pruning_preserves_recursive_and_error_outcomes() {
                     };
                     assert_eq!(actual, expected, "{name} {format} {opt} {arch}");
                 }
-                let program = bundle.join(if format == "exe" {
+                let program = bundle.join(common::exe(if format == "exe" {
                     "program"
                 } else {
                     "consumer"
-                });
+                }));
                 let answer = capture(
                     &bundle,
                     program.to_str().unwrap(),
@@ -402,7 +401,7 @@ fn root_pruning_preserves_recursive_and_error_outcomes() {
 }
 
 #[test]
-#[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and the macOS SDK"]
+#[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and host native prerequisites"]
 fn effect_optimizations_preserve_error_checks_and_native_outcomes() {
     let tmp = TempDir::new("effects");
     let cases = [
@@ -445,7 +444,7 @@ fn effect_optimizations_preserve_error_checks_and_native_outcomes() {
     for (name, source, status, removed, retained) in cases {
         for opt in ["O0", "O2"] {
             let bundle = build(&tmp.0, &format!("{name}-{opt}"), source, "exe", opt, false);
-            for arch in ["x86_64", "arm64"] {
+            for arch in common::arches() {
                 let ir = fs::read_to_string(bundle.join(format!("{arch}.ll"))).unwrap();
                 let bodies = ir
                     .split("define internal %out @zfn")
@@ -468,7 +467,7 @@ fn effect_optimizations_preserve_error_checks_and_native_outcomes() {
             }
             let answer = capture(
                 &bundle,
-                bundle.join("program").to_str().unwrap(),
+                bundle.join(common::exe("program")).to_str().unwrap(),
                 &[],
                 "",
                 Duration::from_secs(10),
@@ -479,7 +478,7 @@ fn effect_optimizations_preserve_error_checks_and_native_outcomes() {
 }
 
 #[test]
-#[ignore = "requires Rust 1.98.1, LLVM 22.1.8, Python 3 and the macOS SDK"]
+#[ignore = "requires Rust 1.98.1, LLVM 22.1.8, Python 3 and host native prerequisites"]
 fn published_examples_work_from_an_independent_host_directory() {
     let tmp = TempDir::new("examples");
     let scalar = build(
@@ -491,7 +490,13 @@ fn published_examples_work_from_an_independent_host_directory() {
         false,
     );
     assert_eq!(result(&scalar, &["20"]), (0, "41\n".into(), "".into()));
-    let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".into());
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
     let answer = capture(
         &tmp.0,
         &python,
@@ -517,7 +522,7 @@ fn published_examples_work_from_an_independent_host_directory() {
     );
     let answer = capture(
         &world,
-        world.join("consumer").to_str().unwrap(),
+        world.join(common::exe("consumer")).to_str().unwrap(),
         &[],
         "!1\n!1\n!2\n",
         Duration::from_secs(15),
@@ -536,4 +541,67 @@ fn published_examples_work_from_an_independent_host_directory() {
             "reading=1 onBench=1"
         ]
     );
+}
+
+#[test]
+#[ignore = "requires pinned native tools and host development libraries"]
+fn copied_compiler_and_relocated_world_bundle_keep_working() {
+    let tmp = TempDir::new("portable world paths with spaces");
+    let compiler = tmp.0.join(common::exe("copied-zebc"));
+    fs::copy(env!("CARGO_BIN_EXE_zebc"), &compiler).unwrap();
+    let source = tmp.0.join("world.t");
+    fs::write(&source, include_str!("../../../examples/world.t")).unwrap();
+    let cache = tmp.0.join("runtime cache");
+    for name in ["first", "second"] {
+        let output = tmp.0.join(name);
+        let result = capture(
+            &tmp.0,
+            compiler.to_str().unwrap(),
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--emit",
+                "shared",
+                "--out-dir",
+                output.to_str().unwrap(),
+                "--runtime-cache",
+                cache.to_str().unwrap(),
+            ],
+            "",
+            Duration::from_secs(240),
+        );
+        assert_eq!(result.0, 0, "{}{}", result.1, result.2);
+        assert!(
+            result
+                .2
+                .contains(if name == "first" { "miss" } else { "hit" }),
+            "{}",
+            result.2
+        );
+    }
+    fs::remove_dir_all(cache).unwrap();
+    fs::remove_dir_all(tmp.0.join("first")).unwrap();
+    let relocated = tmp.0.join("relocated bundle");
+    fs::rename(tmp.0.join("second"), &relocated).unwrap();
+    let result = capture(
+        &tmp.0,
+        relocated.join(common::exe("consumer")).to_str().unwrap(),
+        &[],
+        "!1\n!1\n!2\n",
+        Duration::from_secs(30),
+    );
+    assert_eq!(result, (0, "Ready. Actions: 1 increments, 2 undoes.\nreading=1 onBench=1\nreading=2 onBench=1\nreading=1 onBench=1\n".into(), "".into()));
+    let manifest = fs::read_to_string(relocated.join("manifest.json")).unwrap();
+    assert!(manifest.contains(zeb_frontend::llvm::Target::host().unwrap().name()));
+    if cfg!(windows) {
+        let dlls = fs::read_dir(&relocated)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|s| s == "dll"))
+            .collect::<Vec<_>>();
+        assert_eq!(dlls.len(), 2);
+        for dll in dlls {
+            assert!(dll.with_extension("dll.lib").is_file());
+        }
+    }
 }

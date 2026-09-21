@@ -36,6 +36,9 @@ pub fn validate(
     runtime_leaf: &str,
     target: Target,
 ) -> Result<Vec<NativeCall>, String> {
+    if !target.is_macos() {
+        return Err("stack qualification is not validated for this target".into());
+    }
     let expected = crate::stack_charges::text_functions(symbols)?;
     let mut entries = BTreeMap::new();
     for line in symbols.lines().filter(|s| !s.trim().is_empty()) {
@@ -55,6 +58,9 @@ pub fn validate(
         return Err("unexpected native function inventory".into());
     }
     let format = match target {
+        Target::LinuxX86_64 | Target::WindowsX86_64 => {
+            return Err("stack qualification is not validated for this target".into());
+        }
         Target::MacX86_64 => "file format mach-o 64-bit x86-64",
         Target::MacArm64 => "file format mach-o arm64",
     };
@@ -108,6 +114,9 @@ pub fn validate(
         let op = words.next().ok_or("missing native opcode")?;
         let operands = text.trim().strip_prefix(op).unwrap().trim();
         let (call, branch, unconditional, ret, ordinary) = match target {
+            Target::LinuxX86_64 | Target::WindowsX86_64 => {
+                return Err("stack qualification is not validated for this target".into());
+            }
             Target::MacX86_64 => (
                 op == "callq",
                 matches!(op, "jae" | "jb" | "je" | "jge" | "jmp" | "jne" | "jno"),

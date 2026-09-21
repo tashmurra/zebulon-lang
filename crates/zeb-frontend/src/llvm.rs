@@ -10,21 +10,116 @@ use crate::{
 };
 use std::fmt::{self, Write};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
     MacX86_64,
     MacArm64,
+    LinuxX86_64,
+    WindowsX86_64,
 }
 impl Target {
+    pub fn host() -> Result<Self, String> {
+        Self::for_host(std::env::consts::OS, std::env::consts::ARCH)
+    }
+    pub fn for_host(os: &str, arch: &str) -> Result<Self, String> {
+        match (os, arch) {
+            ("macos", "x86_64") => Ok(Self::MacX86_64),
+            ("macos", "aarch64") => Ok(Self::MacArm64),
+            ("linux", "x86_64") => Ok(Self::LinuxX86_64),
+            ("windows", "x86_64") => Ok(Self::WindowsX86_64),
+            _ => Err(format!("unsupported native host: {os}/{arch}")),
+        }
+    }
+    pub fn is_macos(self) -> bool {
+        matches!(self, Self::MacX86_64 | Self::MacArm64)
+    }
+    pub fn is_windows(self) -> bool {
+        self == Self::WindowsX86_64
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::MacX86_64 => "macos-x86_64",
+            Self::MacArm64 => "macos-arm64",
+            Self::LinuxX86_64 => "linux-x86_64",
+            Self::WindowsX86_64 => "windows-x86_64",
+        }
+    }
+    pub fn arch(self) -> &'static str {
+        if self == Self::MacArm64 {
+            "arm64"
+        } else {
+            "x86_64"
+        }
+    }
+    pub fn rust_triple(self) -> &'static str {
+        match self {
+            Self::MacX86_64 => "x86_64-apple-darwin",
+            Self::MacArm64 => "aarch64-apple-darwin",
+            _ => self.triple(),
+        }
+    }
+    pub fn slices(self) -> &'static [Self] {
+        match self {
+            Self::MacX86_64 | Self::MacArm64 => &[Self::MacX86_64, Self::MacArm64],
+            Self::LinuxX86_64 => &[Self::LinuxX86_64],
+            Self::WindowsX86_64 => &[Self::WindowsX86_64],
+        }
+    }
+    pub fn bundle_name(self) -> &'static str {
+        if self.is_macos() {
+            "macos-universal"
+        } else {
+            self.name()
+        }
+    }
+    pub fn shared_ext(self) -> &'static str {
+        if self.is_macos() {
+            "dylib"
+        } else if self.is_windows() {
+            "dll"
+        } else {
+            "so"
+        }
+    }
+    pub fn object_ext(self) -> &'static str {
+        if self.is_windows() { "obj" } else { "o" }
+    }
+    pub fn archive_ext(self) -> &'static str {
+        if self.is_windows() { "lib" } else { "a" }
+    }
+    pub fn executable(self, name: &str) -> String {
+        if self.is_windows() {
+            format!("{name}.exe")
+        } else {
+            name.into()
+        }
+    }
+    pub fn ir_symbol(self, symbol: &str) -> &str {
+        if self.is_macos() {
+            symbol.strip_prefix('_').unwrap_or(symbol)
+        } else {
+            symbol
+        }
+    }
     pub fn cpu(self) -> &'static str {
         match self {
-            Self::MacX86_64 => "x86-64",
+            Self::MacX86_64 | Self::LinuxX86_64 | Self::WindowsX86_64 => "x86-64",
             Self::MacArm64 => "generic",
+        }
+    }
+    /// Match the pinned Rust target baseline so LTO may inline runtime code.
+    pub fn function_attributes(self) -> &'static str {
+        match self {
+            Self::WindowsX86_64 => {
+                r#""target-cpu"="x86-64" "target-features"="+cx16,+sse,+sse2,+sse3,+sahf""#
+            }
+            Self::MacX86_64 | Self::LinuxX86_64 => r#""target-cpu"="x86-64""#,
+            Self::MacArm64 => r#""target-cpu"="generic""#,
         }
     }
     pub fn clang_cpu(self) -> &'static str {
         match self {
-            Self::MacX86_64 => "-march=x86-64",
+            Self::MacX86_64 | Self::LinuxX86_64 | Self::WindowsX86_64 => "-march=x86-64",
             Self::MacArm64 => "-mcpu=generic",
         }
     }
@@ -32,6 +127,8 @@ impl Target {
         match self {
             Self::MacX86_64 => "x86_64-apple-macosx14.0.0",
             Self::MacArm64 => "arm64-apple-macosx14.0.0",
+            Self::LinuxX86_64 => "x86_64-unknown-linux-gnu",
+            Self::WindowsX86_64 => "x86_64-pc-windows-msvc",
         }
     }
 }
@@ -2841,7 +2938,7 @@ pub fn emit_stack_entry_with_runtime_candidate(
     }
     let charge = charges[root].general;
     let root_failure = ((function.start as u64) << 32) | 8;
-    write!(module, "\ndefine i64 @{symbol}(i32 %abi, i64 %budget{parameters_text}) noredzone \"target-cpu\"=\"{}\" {{\nentry:\n  %version = icmp eq i32 %abi, 3\n  br i1 %version, label %admit, label %mismatch\nmismatch:\n  ret i64 7\nadmit:\n  %small = icmp ult i64 %budget, {charge}\n  br i1 %small, label %exhausted, label %invoke\nexhausted:\n  ret i64 {root_failure}\ninvoke:\n  %remaining = sub i64 %budget, {charge}\n{packing}  %result = call %out @zfn{root}({arguments})\n  %value = extractvalue %out %result, 0\n  %code = extractvalue %out %result, 1\n  %site = extractvalue %out %result, 2\n  %failed = icmp ne i32 %code, 0\n  %kind = add i32 %code, 2\n  %tag = zext i32 %kind to i64\n  %offset = shl i64 %site, 32\n  %error = or i64 %offset, %tag\n  %word = select i1 %failed, i64 %error, i64 %value\n  ret i64 %word\n}}\n", target.cpu()).map_err(|_| Diagnostic::resource(0))?;
+    write!(module, "\ndefine i64 @{symbol}(i32 %abi, i64 %budget{parameters_text}) noredzone {} {{\nentry:\n  %version = icmp eq i32 %abi, 3\n  br i1 %version, label %admit, label %mismatch\nmismatch:\n  ret i64 7\nadmit:\n  %small = icmp ult i64 %budget, {charge}\n  br i1 %small, label %exhausted, label %invoke\nexhausted:\n  ret i64 {root_failure}\ninvoke:\n  %remaining = sub i64 %budget, {charge}\n{packing}  %result = call %out @zfn{root}({arguments})\n  %value = extractvalue %out %result, 0\n  %code = extractvalue %out %result, 1\n  %site = extractvalue %out %result, 2\n  %failed = icmp ne i32 %code, 0\n  %kind = add i32 %code, 2\n  %tag = zext i32 %kind to i64\n  %offset = shl i64 %site, 32\n  %error = or i64 %offset, %tag\n  %word = select i1 %failed, i64 %error, i64 %value\n  ret i64 %word\n}}\n", target.function_attributes()).map_err(|_| Diagnostic::resource(0))?;
     Ok(module.0)
 }
 
@@ -3084,8 +3181,8 @@ fn emit_module(
                     .map_err(|_| Diagnostic::resource(0))?;
             }
             e.line(format_args!(
-                ") \"target-cpu\"=\"{}\"{}{} {{\nentry:",
-                target.cpu(),
+                ") {}{}{} {{\nentry:",
+                target.function_attributes(),
                 if charges.is_some() { " noredzone" } else { "" },
                 attributes.unwrap_or("")
             ))?;

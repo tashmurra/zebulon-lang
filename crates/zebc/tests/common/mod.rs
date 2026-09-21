@@ -52,7 +52,17 @@ pub fn runs_on_host(arch: &str) -> bool {
     }
 }
 
-/// Supervise a test process using files so output cannot deadlock a pipe.
+pub fn arches() -> Vec<&'static str> {
+    zeb_frontend::llvm::Target::host()
+        .unwrap()
+        .slices()
+        .iter()
+        .map(|t| t.arch())
+        .collect()
+}
+pub fn exe(name: &str) -> String {
+    zeb_frontend::llvm::Target::host().unwrap().executable(name)
+}
 pub fn capture(
     dir: &Path,
     program: &str,
@@ -60,53 +70,6 @@ pub fn capture(
     input: &str,
     timeout: std::time::Duration,
 ) -> (i32, String, String) {
-    #[cfg(unix)]
-    use std::os::unix::process::CommandExt;
-    use std::{
-        process::{Command, Stdio},
-        time::Instant,
-    };
-    let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    let stdin = dir.join(format!("stdin-{id}"));
-    let stdout = dir.join(format!("stdout-{id}"));
-    let stderr = dir.join(format!("stderr-{id}"));
-    fs::write(&stdin, input).unwrap();
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(dir)
-        .stdin(fs::File::open(&stdin).unwrap())
-        .stdout(fs::File::create(&stdout).unwrap())
-        .stderr(fs::File::create(&stderr).unwrap());
-    #[cfg(unix)]
-    command.process_group(0);
-    let mut child = command.spawn().unwrap_or_else(|e| panic!("{program}: {e}"));
-    let start = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if start.elapsed() > timeout
-            || [&stdout, &stderr]
-                .iter()
-                .any(|p| fs::metadata(p).unwrap().len() > 4 * 1024 * 1024)
-        {
-            let _ = Command::new("/bin/kill")
-                .args(["-KILL", "--", &format!("-{}", child.id())])
-                .current_dir(dir)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("native command exceeded time/output budget: {program} {args:?}");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    };
-    (
-        status.code().unwrap_or(-1),
-        fs::read_to_string(stdout).unwrap(),
-        fs::read_to_string(stderr).unwrap(),
-    )
+    let (code, out, err) = zebc::process::capture(dir, program, args, input, timeout).unwrap();
+    (code, out.replace("\r\n", "\n"), err.replace("\r\n", "\n"))
 }

@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+#![cfg(target_os = "macos")]
+// Experimental stack qualification remains Mach-O-specific.
 mod common;
 use std::{
     fs,

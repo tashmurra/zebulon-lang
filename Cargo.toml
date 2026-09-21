@@ -14,3 +14,7 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = "warn"
+
+# Native tool fingerprints hash large LLVM and Rust libraries even in debug tests.
+[profile.dev.package.sha2]
+opt-level = 3

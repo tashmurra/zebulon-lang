@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import platform
 
 
 def main():
@@ -20,9 +21,19 @@ def main():
         raise SystemExit("cannot find configured llvm-config executable")
     config = str(Path(found).absolute())
     binary = subprocess.check_output([config, "--bindir"], cwd=bundle, text=True).strip()
-    sdk = os.environ.get("SDKROOT")
-    if sdk is None:
-        sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], cwd=bundle, text=True).strip()
+    system = platform.system()
+    flags = []
+    if system == "Darwin":
+        sdk = os.environ.get("SDKROOT")
+        if sdk is None:
+            sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], cwd=bundle, text=True).strip()
+        flags = ["-isysroot", sdk, "-mmacosx-version-min=14.0", "-Wl,-rpath,@loader_path"]
+    elif system == "Linux":
+        flags = ["-Wl,-rpath,$ORIGIN", "--ld-path=" + str(Path(binary) / "ld.lld")]
+    elif system == "Windows":
+        flags = ["-fuse-ld=lld", "-B" + binary]
+    else:
+        raise SystemExit("unsupported native host")
     # The manifest/header are trusted outputs of this compiler, not downloaded input.
     source = Path(__file__).resolve().with_name("embedding.c")
     symbol = manifest["game_entry"]
@@ -31,18 +42,18 @@ def main():
         raise SystemExit("invalid manifest entry symbol")
     libraries = []
     for key in ("game", "runtime"):
-        name = manifest[key]
+        name = manifest.get(key + "_import", manifest[key])
         if Path(name).name != name:
             raise SystemExit("manifest library must be a filename")
         path = bundle / name
         if path not in libraries:
             libraries.append(path)
-    output = bundle / "embedding-example"
+    output = bundle / ("embedding-example.exe" if system == "Windows" else "embedding-example")
     subprocess.run([
-        str(Path(binary) / "clang"), "-std=c11", "-Wall", "-Wextra", "-Werror",
-        "-isysroot", sdk, "-mmacosx-version-min=14.0", "-I", str(bundle),
+        str(Path(binary) / ("clang.exe" if system == "Windows" else "clang")), "-std=c11", "-Wall", "-Wextra", "-Werror",
+        *flags, "-I", str(bundle),
         "-DZEB_ENTRY=" + symbol, str(source), *map(str, libraries),
-        "-Wl,-rpath,@loader_path", "-o", str(output),
+        "-o", str(output),
     ], cwd=bundle, check=True)
     subprocess.run([str(output)], cwd=bundle, check=True)
 
