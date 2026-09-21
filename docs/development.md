@@ -14,7 +14,9 @@ Install Rust using rustup, then use the checked-in toolchain file. For native ma
 python3 tools/bootstrap_llvm.py build/llvm
 ```
 
-The bootstrap verifies pinned upstream archive SHA-256 values. Apple Silicon macOS uses the upstream binary archive; Intel macOS, Linux and Windows build the required tools from the pinned upstream source archive using CMake and Ninja. Source builds can take substantially longer than project tests. Windows bootstrap must run in an x64 Visual Studio developer environment. It installs only below the directory you supply and prints the `ZEB_LLVM_CONFIG` assignment to use. It does not run sudo or change the system developer-tool selection.
+The bootstrap downloads only official prebuilt LLVM 22.1.8 archives: `LLVM-22.1.8-macOS-ARM64.tar.xz`, `LLVM-22.1.8-Linux-X64.tar.xz`, or the full `clang+llvm-22.1.8-x86_64-pc-windows-msvc.tar.xz` archive (not the smaller Windows installer). SHA-256 values are pinned from the official GitHub release asset digests. It checks the checksum before extraction, then verifies the presence and pinned version of every required tool. Missing tools or host incompatibility stop setup with an explicit error; there is no source-build fallback.
+
+CI caches only the extracted installation, with archive provenance recorded inside it. Archives and partial downloads are excluded from the cache. An Intel Mac must use an existing LLVM 22.1.8 installation selected via `ZEB_LLVM_CONFIG`; the bootstrap has no pinned Intel macOS binary. Windows requires an x64 Visual Studio developer environment and Windows SDK. The bootstrap installs only below the supplied directory, requires Python 3.12+, and never runs sudo or changes system developer-tool selection.
 
 Do not replace version validation with a bypass to make a test pass. New compiler versions need their own native/LTO checks. SDK selection follows `SDKROOT` or the active Apple developer tools; paths containing spaces are supported.
 
@@ -34,7 +36,7 @@ Add a focused regression at the layer where the defect occurs. Tests of compiler
 
 ## Clean-checkout checks and CI
 
-The CI workflow runs formatting, workspace tests, Clippy, repository checks, release builds and the native suite on Ubuntu 24.04 x86-64, Windows Server 2025 x86-64, Apple Silicon macOS 15. The bootstrap’s `--config-out PATH` writes JSON containing `llvm_config` for shell-independent configuration. LLVM build caches include host OS/architecture and a recipe revision. The macOS runner builds both architecture slices but executes only Apple Silicon; Intel execution is not covered by CI. Successful jobs upload host-specific compiler artifacts.
+The CI workflow runs formatting, workspace tests, Clippy, repository checks, release builds and the native suite on Ubuntu 24.04 x86-64, Windows Server 2025 x86-64, Apple Silicon macOS 15. The bootstrap’s `--config-out PATH` writes JSON containing `llvm_config` for shell-independent configuration. Extracted LLVM installation caches include host OS/architecture and a recipe revision. The macOS runner builds both architecture slices but executes only Apple Silicon; Intel execution is not covered by CI. Successful jobs upload host-specific compiler artifacts.
 
 Experimental physical-stack qualification remains macOS-specific and rejects new targets explicitly; production executable, object, static/shared and world modes are tested on all supported hosts. Full LTO remains restricted to optimized scalar shared bundles. Every host must execute successfully before reporting execution validation for it. A generated workflow or cross-target check is not a successful native CI run.
 

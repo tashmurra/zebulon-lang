@@ -11,7 +11,7 @@ The `zebc` compiler, frontend, runtime and generic collection helpers are includ
 - macOS additionally requires an Apple macOS SDK, `llvm-lipo`, and both Rust targets: `rustup target add x86_64-apple-darwin aarch64-apple-darwin`.
 - Linux x86-64 requires the host C/C++ development toolchain (including libc headers and startup libraries).
 - Windows x86-64 requires Visual Studio C++ Build Tools and a Windows SDK. Run from an **x64 Developer PowerShell** so `INCLUDE` and `LIB` are configured.
-- Python 3 for repository checks and embedding examples; Python 3.12+, CMake and Ninja for the optional LLVM bootstrap.
+- Python 3 for repository checks and embedding examples; Python 3.12+ for the optional prebuilt LLVM bootstrap.
 
 Each compiler builds for its host OS. macOS output is universal arm64/x86-64 with deployment target 14.0; Linux output uses the x86-64 GNU/Linux ABI; Windows output uses the x86-64 MSVC ABI. Cross-OS builds, Linux/Windows ARM64, musl, MinGW and iOS are not supported. Build success alone does not establish execution on another architecture or compatibility with older operating systems.
 

@@ -590,7 +590,7 @@ fn copied_compiler_and_relocated_world_bundle_keep_working() {
         "!1\n!1\n!2\n",
         Duration::from_secs(30),
     );
-    assert_eq!(result, (0, "1\n2\n1\n".into(), "".into()));
+    assert_eq!(result, (0, "Ready. Actions: 1 increments, 2 undoes.\nreading=1 onBench=1\nreading=2 onBench=1\nreading=1 onBench=1\n".into(), "".into()));
     let manifest = fs::read_to_string(relocated.join("manifest.json")).unwrap();
     assert!(manifest.contains(zeb_frontend::llvm::Target::host().unwrap().name()));
     if cfg!(windows) {
