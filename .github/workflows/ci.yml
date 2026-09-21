@@ -1,5 +1,12 @@
 name: Compiler and runtime
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: native-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
@@ -37,7 +44,8 @@ jobs:
         run: rustup target add --toolchain 1.98.1 x86_64-apple-darwin aarch64-apple-darwin
       - name: Install LLVM build prerequisites
         run: python -m pip install cmake ninja
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: llvm-cache
         with:
           path: ${{ runner.temp }}/zeb-llvm
           key: llvm-22.1.8-${{ runner.os }}-${{ runner.arch }}-native-v2
@@ -46,6 +54,12 @@ jobs:
         run: |
           python tools/bootstrap_llvm.py "$RUNNER_TEMP/zeb-llvm" --config-out "$RUNNER_TEMP/zeb-llvm.json"
           python -c 'import json, os; p=json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "zeb-llvm.json"))); print("ZEB_LLVM_CONFIG=" + p["llvm_config"])' >> "$GITHUB_ENV"
+      - name: Save validated LLVM toolchain
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/zeb-llvm
+          key: llvm-22.1.8-${{ runner.os }}-${{ runner.arch }}-native-v2
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run workspace tests

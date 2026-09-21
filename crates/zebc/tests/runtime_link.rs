@@ -70,7 +70,11 @@ fn safe_runtime_dylib_links_from_generated_llvm_and_c() {
         .collect();
         args.extend(tools.rust_args(target, &runtime));
         tools.run(&folder, rustc, &args).unwrap();
-        let symbols = tools.symbols(&folder, &runtime, false).unwrap();
+        let symbols = if target.is_windows() {
+            tools.exports(&folder, &runtime).unwrap()
+        } else {
+            tools.symbols(&folder, &runtime, false).unwrap()
+        };
         fs::write(folder.join("symbols.txt"), &symbols).unwrap();
         let candidates: Vec<_> = symbols
             .lines()

@@ -157,6 +157,31 @@ mod tests {
     }
 
     #[test]
+    fn windows_import_libraries_are_copied_and_checked() {
+        let root = fixture();
+        let out = root.0.join("out");
+        let warm = root.0.join("warm");
+        let cache = root.0.join("cache/windows-x86_64");
+        fs::create_dir(&out).unwrap();
+        fs::create_dir(&warm).unwrap();
+        fs::write(out.join("runtime.dll"), b"runtime image").unwrap();
+        fs::write(out.join("runtime.dll.lib"), b"runtime imports").unwrap();
+        fs::write(out.join("rust-build.txt"), b"build log").unwrap();
+        publish(&cache, &out, "runtime.dll").unwrap();
+        assert!(restore(&cache, &warm, "runtime.dll").unwrap());
+        assert_eq!(
+            fs::read(warm.join("runtime.dll.lib")).unwrap(),
+            b"runtime imports"
+        );
+        fs::write(cache.join("runtime.dll.lib"), b"corrupted imports").unwrap();
+        assert!(
+            restore(&cache, &warm, "runtime.dll")
+                .unwrap_err()
+                .contains("checksum mismatch")
+        );
+    }
+
+    #[test]
     fn changed_sources_tools_recipe_and_architecture_miss() {
         let root = fixture();
         let out = root.0.join("out");

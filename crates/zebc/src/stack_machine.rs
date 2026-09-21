@@ -36,6 +36,9 @@ pub fn validate(
     runtime_leaf: &str,
     target: Target,
 ) -> Result<Vec<NativeCall>, String> {
+    if !target.is_macos() {
+        return Err("stack qualification is not validated for this target".into());
+    }
     let expected = crate::stack_charges::text_functions(symbols)?;
     let mut entries = BTreeMap::new();
     for line in symbols.lines().filter(|s| !s.trim().is_empty()) {

@@ -23,23 +23,27 @@ check validates supported scalar/object source; build emits host-native bundles 
 const CAPABILITIES_TEMPLATE: &str = r#"{"schema":1,"compiler":"zebc","profile":"scalar-flow-v1","source_encodings":["utf-8","ascii","latin-1","utf-16le","utf-16be"],"token_inspection":true,"ast_inspection":true,"named_object_initialization_llvm":true,"scalar_ir_inspection":true,"llvm_inspection":true,"preliminary_semantic_checks":true,"semantic_check":true,"native_compilation":true,"native_profile":"scalar-executable-v1","shared_profile":"scalar-shared-v1","integer_argument_profiles":["scalar-shared-i32-v2","scalar-object-i32-v2","scalar-static-i32-v2"],"object_profile":"scalar-object-v1","static_profile":"scalar-static-v1","lto_modes":{"default":"none","full":"shared-O2-only"},"memory_models":["lifetimes","ownership"],"default_memory_model":"lifetimes","object_shared_profile":"{object_profile}","game_execution":true,"qualified_targets":[]}"#;
 
 fn capabilities() -> String {
-    {
-        let targets = llvm::Target::host()
-            .map(|t| {
-                t.slices()
-                    .iter()
-                    .map(|t| format!("\"{}\"", t.name()))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            })
-            .unwrap_or_default();
-        CAPABILITIES_TEMPLATE
-            .replace("{object_profile}", object_build::PROFILE)
-            .replace(
-                "\"qualified_targets\":[]",
-                &format!("\"build_targets\":[{targets}],\"qualified_targets\":[]"),
-            )
-    }
+    let host = llvm::Target::host();
+    let targets = host
+        .as_ref()
+        .map(|t| {
+            t.slices()
+                .iter()
+                .map(|t| format!("\"{}\"", t.name()))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    CAPABILITIES_TEMPLATE
+        .replace("{object_profile}", object_build::PROFILE)
+        .replace(
+            "\"native_compilation\":true",
+            &format!("\"native_compilation\":{}", host.is_ok()),
+        )
+        .replace(
+            "\"qualified_targets\":[]",
+            &format!("\"build_targets\":[{targets}],\"qualified_targets\":[]"),
+        )
 }
 
 fn main() -> ExitCode {

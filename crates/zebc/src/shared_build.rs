@@ -240,11 +240,15 @@ pub fn build(
                 tools.run(&folder, &rustc, &args)?
             };
             write(&folder, "rust-build.txt", text)?;
-            let symbols = tools.symbols(
-                &folder,
-                if full_lto { "runtime.bc" } else { &runtime_lib },
-                false,
-            )?;
+            let symbols = if target.is_windows() && format == Format::Shared && !full_lto {
+                tools.exports(&folder, &runtime_lib)?
+            } else {
+                tools.symbols(
+                    &folder,
+                    if full_lto { "runtime.bc" } else { &runtime_lib },
+                    false,
+                )?
+            };
             let candidates: Vec<_> = symbols
                 .lines()
                 .filter_map(|line| line.split_whitespace().last())

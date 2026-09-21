@@ -432,7 +432,6 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    #[cfg(target_os = "macos")]
     fn replacing_an_input_changes_its_fingerprint() {
         let dir = env::temp_dir().join(format!("zeb-tool-digest-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -446,7 +445,7 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     fn missing_target_libraries_have_installation_guidance() {
         use std::os::unix::fs::PermissionsExt;
         let dir = env::temp_dir().join(format!("zeb-missing-stdlib-{}", std::process::id()));
@@ -462,13 +461,12 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    #[cfg(target_os = "macos")]
     fn explicit_invalid_llvm_is_an_error() {
         let options = Options {
             llvm_config: Some("/missing/explicit-llvm-config".into()),
             ..Options::default()
         };
-        let error = Toolchain::resolve_with(Path::new("/tmp"), &options).unwrap_err();
+        let error = Toolchain::resolve_with(&env::temp_dir(), &options).unwrap_err();
         assert!(error.contains("/missing/explicit-llvm-config"));
     }
 }

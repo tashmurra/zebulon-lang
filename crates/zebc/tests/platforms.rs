@@ -30,6 +30,10 @@ fn supported_hosts_have_explicit_target_sets() {
 #[test]
 fn new_targets_do_not_inherit_stack_qualification() {
     for target in [Target::LinuxX86_64, Target::WindowsX86_64] {
-        assert!(zebc::stack_machine::validate("", "", "_Rleaf", target).is_err());
+        assert!(
+            zebc::stack_machine::validate("", "", "_Rleaf", target)
+                .unwrap_err()
+                .contains("not validated")
+        );
     }
 }

@@ -542,3 +542,66 @@ fn published_examples_work_from_an_independent_host_directory() {
         ]
     );
 }
+
+#[test]
+#[ignore = "requires pinned native tools and host development libraries"]
+fn copied_compiler_and_relocated_world_bundle_keep_working() {
+    let tmp = TempDir::new("portable world paths with spaces");
+    let compiler = tmp.0.join(common::exe("copied-zebc"));
+    fs::copy(env!("CARGO_BIN_EXE_zebc"), &compiler).unwrap();
+    let source = tmp.0.join("world.t");
+    fs::write(&source, include_str!("../../../examples/world.t")).unwrap();
+    let cache = tmp.0.join("runtime cache");
+    for name in ["first", "second"] {
+        let output = tmp.0.join(name);
+        let result = capture(
+            &tmp.0,
+            compiler.to_str().unwrap(),
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--emit",
+                "shared",
+                "--out-dir",
+                output.to_str().unwrap(),
+                "--runtime-cache",
+                cache.to_str().unwrap(),
+            ],
+            "",
+            Duration::from_secs(240),
+        );
+        assert_eq!(result.0, 0, "{}{}", result.1, result.2);
+        assert!(
+            result
+                .2
+                .contains(if name == "first" { "miss" } else { "hit" }),
+            "{}",
+            result.2
+        );
+    }
+    fs::remove_dir_all(cache).unwrap();
+    fs::remove_dir_all(tmp.0.join("first")).unwrap();
+    let relocated = tmp.0.join("relocated bundle");
+    fs::rename(tmp.0.join("second"), &relocated).unwrap();
+    let result = capture(
+        &tmp.0,
+        relocated.join(common::exe("consumer")).to_str().unwrap(),
+        &[],
+        "!1\n!1\n!2\n",
+        Duration::from_secs(30),
+    );
+    assert_eq!(result, (0, "1\n2\n1\n".into(), "".into()));
+    let manifest = fs::read_to_string(relocated.join("manifest.json")).unwrap();
+    assert!(manifest.contains(zeb_frontend::llvm::Target::host().unwrap().name()));
+    if cfg!(windows) {
+        let dlls = fs::read_dir(&relocated)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|s| s == "dll"))
+            .collect::<Vec<_>>();
+        assert_eq!(dlls.len(), 2);
+        for dll in dlls {
+            assert!(dll.with_extension("dll.lib").is_file());
+        }
+    }
+}
