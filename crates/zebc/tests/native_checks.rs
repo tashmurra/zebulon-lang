@@ -46,6 +46,50 @@ fn result(bundle: &Path, args: &[&str]) -> (i32, String, String) {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+#[ignore = "requires pinned LLVM and both macOS Rust targets"]
+fn hello_world_universal_bundle_and_thin_slice_rejection() {
+    let tmp = TempDir::new("hello-universal");
+    let bundle = build(
+        &tmp.0,
+        "hello",
+        "enum token tokWord;\nstartup() { \"Hello, world!\\n\"; return nil; }\nturn(tokens) { return nil; }\n",
+        "shared",
+        "O0",
+        false,
+    );
+    assert_eq!(
+        result(&bundle, &[]),
+        (0, "Hello, world!\n".into(), "".into())
+    );
+    let tools = common::tools(&tmp.0);
+    for entry in fs::read_dir(&bundle).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap();
+        if name == "consumer" || name.ends_with(".dylib") {
+            let arches = capture(
+                &bundle,
+                &tools.lipo,
+                &["-archs", name],
+                "",
+                Duration::from_secs(30),
+            );
+            assert_eq!(arches.0, 0, "{arches:?}");
+            let mut arches: Vec<_> = arches.1.split_whitespace().collect();
+            arches.sort();
+            assert_eq!(arches, ["arm64", "x86_64"]);
+        }
+    }
+    for arch in ["x86_64", "arm64"] {
+        assert!(
+            tools
+                .verify_universal(&bundle.join(arch), "consumer")
+                .is_err()
+        );
+    }
+}
+
+#[test]
 #[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and host native prerequisites"]
 fn link_modes_lto_and_independent_consumers() {
     let tmp = TempDir::new("link-modes");

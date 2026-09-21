@@ -517,7 +517,6 @@ fn full_link(folder: &Path, target: Target, game: &str, tools: &Toolchain) -> Re
     if !target.is_macos() {
         return portable_full_link(folder, target, game, tools);
     }
-    let bin = &tools.bin;
     let sdk = tools.sdk.as_str();
     let common = [
         "-target",
@@ -534,7 +533,7 @@ fn full_link(folder: &Path, target: Target, game: &str, tools: &Toolchain) -> Re
         args.extend(["-c", input, "-o", output]);
         command(folder, &tools.tool("clang"), &args)?;
     }
-    let linker = format!("-fuse-ld={bin}/ld64.lld");
+    let linker = format!("-fuse-ld={}", tools.tool("ld64.lld"));
     let install_name = format!("-Wl,-install_name,@rpath/{game}");
     let mut args = common.to_vec();
     args.extend([
@@ -556,7 +555,7 @@ fn full_link(folder: &Path, target: Target, game: &str, tools: &Toolchain) -> Re
     )?;
     command(
         folder,
-        &format!("{bin}/llvm-dis"),
+        &tools.tool("llvm-dis"),
         &[optimized, "-o", "lto-optimized.ll"],
     )?;
     // Generate the object and frame report together from the optimized combined
