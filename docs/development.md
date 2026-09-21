@@ -49,3 +49,5 @@ For a portability check, copy only tracked source into a new directory, use an e
 Keep language behavior stable during packaging refactors. Changes to source semantics or the embedding ABI need explicit documentation and tests. Do not add first-party unsafe code. Do not expose internal Rust layouts as public C structures or portable save data.
 
 Keep build artifacts, native fingerprints and logs ignored. Never claim performance, minimum-OS compatibility, or execution on a different architecture from build success alone. Native compilation targets the current supported host OS. Adding architectures or cross-compilation requires separate toolchain and execution coverage.
+
+Windows generated IR uses the pinned Rust MSVC target’s x86-64 baseline (SSE3, CMPXCHG16B and LAHF/SAHF, in addition to SSE2). Matching runtime and game function attributes allows full LTO to inline across the runtime boundary. This does not qualify execution on an older Windows release or a different architecture.
