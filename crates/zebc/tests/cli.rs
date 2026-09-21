@@ -34,6 +34,30 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn version_matches_cargo_package_and_capabilities() {
+    let fixture = Fixture::new();
+    let version = env!("CARGO_PKG_VERSION");
+    let out = fixture.run(&["--version"]);
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("zebc {version}\n")
+    );
+    assert!(out.stderr.is_empty());
+
+    let out = fixture.run(&["capabilities", "--format", "json"]);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains(&format!("\"compiler_version\":\"{version}\""))
+    );
+    assert!(out.stderr.is_empty());
+
+    assert_eq!(fixture.run(&["--version", "extra"]).status.code(), Some(2));
+}
+
+#[test]
 fn capabilities_and_unavailable_compilation_are_honest() {
     let fixture = Fixture::new();
     fs::write(fixture.0.join("scalar.t"), "main() { return 42; }").unwrap();

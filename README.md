@@ -35,10 +35,11 @@ From the repository root:
 ```sh
 cargo build --workspace --locked
 cargo run --locked -p zebc -- --help
+cargo run --locked -p zebc -- --version
 cargo install --path crates/zebc --locked
 ```
 
-The installed compiler embeds the runtime source it needs; it does not need this checkout when building another project. If Rust was installed using rustup, ensure its binaries are on `PATH`. Native builds also need the external tools listed above.
+`zebc --version` prints the Cargo package version. `zebc capabilities --format json` reports it as `compiler_version`, separately from capability and bundle schema versions. The installed compiler embeds the runtime source it needs; it does not need this checkout when building another project. If Rust was installed using rustup, ensure its binaries are on `PATH`. Native builds also need the external tools listed above.
 
 ## First program
 
