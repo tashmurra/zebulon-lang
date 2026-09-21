@@ -30,14 +30,12 @@ fn invalid_runtime_symbols_cannot_enter_llvm() {
     assert!(text.contains("i32 5, i64 0"));
 }
 #[test]
-#[ignore = "requires installed Rust 1.98.1, LLVM 22.1.8 and the macOS SDK"]
+#[ignore = "requires installed Rust 1.98.1, LLVM 22.1.8 and host native prerequisites"]
 fn safe_runtime_dylib_links_from_generated_llvm_and_c() {
     let root = common::root();
     let temporary = common::TempDir::new("runtime-link");
     let dir = temporary.0.clone();
     let tools = common::tools(&dir);
-    let bin = tools.bin.as_str();
-    let sdk = tools.sdk.as_str();
     let rustc = &tools.rustc;
     let source = root.join("crates/zeb-runtime/src/lib.rs");
     let ast = parser::parse_with(
@@ -49,106 +47,98 @@ fn safe_runtime_dylib_links_from_generated_llvm_and_c() {
         Model::Ownership,
     )
     .unwrap();
-    for (arch, target, rust_target) in [
-        ("x86_64", Target::MacX86_64, "x86_64-apple-darwin"),
-        ("arm64", Target::MacArm64, "aarch64-apple-darwin"),
-    ] {
+    let runtime = format!("libzeb_runtime.{}", tools.host.shared_ext());
+    for &target in tools.host.slices() {
+        let arch = target.arch();
+        let rust_target = target.rust_triple();
         let folder = dir.join(arch);
         fs::create_dir(&folder).unwrap();
-        run(
-            &folder,
-            "/usr/bin/env",
-            &[
-                "MACOSX_DEPLOYMENT_TARGET=14.0",
-                &format!("SDKROOT={sdk}"),
-                rustc,
-                "--edition=2024",
-                "--crate-name",
-                "zeb_runtime",
-                "--crate-type=dylib",
-                "--target",
-                rust_target,
-                "-C",
-                &format!("target-cpu={}", target.cpu()),
-                "-C",
-                "opt-level=2",
-                "-C",
-                "link-arg=-Wl,-install_name,@rpath/libzeb_runtime.dylib",
-                source.to_str().unwrap(),
-                "-o",
-                "libzeb_runtime.dylib",
-            ],
-        );
-        let symbols = run(
-            &folder,
-            &format!("{bin}/llvm-nm"),
-            &["--extern-only", "--defined-only", "libzeb_runtime.dylib"],
-        );
+        let mut args: Vec<String> = [
+            "--edition=2024",
+            "--crate-name=zeb_runtime",
+            "--crate-type=dylib",
+            "--target",
+            rust_target,
+            "-C",
+            "opt-level=2",
+            source.to_str().unwrap(),
+            "-o",
+            &runtime,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        args.extend(tools.rust_args(target, &runtime));
+        tools.run(&folder, rustc, &args).unwrap();
+        let symbols = tools.symbols(&folder, &runtime, false).unwrap();
         fs::write(folder.join("symbols.txt"), &symbols).unwrap();
         let candidates: Vec<_> = symbols
             .lines()
             .filter_map(|line| line.split_whitespace().last())
-            .filter(|s| s.starts_with("__R") && s.ends_with("13SCALAR_API_V1"))
+            .filter(|s| {
+                target.ir_symbol(s).starts_with("_R")
+                    && s.ends_with("13SCALAR_API_V1")
+                    && !s.starts_with("__imp_")
+            })
             .collect();
         assert_eq!(candidates.len(), 1, "{symbols}");
-        let symbol = &candidates[0][1..];
+        let symbol = target.ir_symbol(candidates[0]);
         fs::write(folder.join("symbol.txt"), symbol).unwrap();
         let consumer = format!(
             "#include <stdint.h>\n#include <stddef.h>\nstruct scalar_api {{ uint32_t version; uint32_t size; uint32_t (*classify)(uint64_t); }};\n_Static_assert(sizeof(struct scalar_api)==16,\"size\");\n_Static_assert(offsetof(struct scalar_api,classify)==8,\"offset\");\nextern const struct scalar_api {symbol};\nint main(void) {{ const struct scalar_api *api=&{symbol}; if(api->version!=1 || api->size!=16)return 1; const uint64_t values[]={{0,1,2,UINT64_C(0xffffffff00000002),UINT64_C(0x8000000000000002),3,UINT64_MAX,UINT64_C(0x100000000),UINT64_C(0x100000001)}}; const uint32_t expected[]={{0,1,2,2,2,255,255,255,255}}; for(unsigned i=0;i<9;i++)if(api->classify(values[i])!=expected[i])return 2; return 0; }}\n"
         );
+        let consumer = if target.is_windows() {
+            consumer.replace("extern const", "__declspec(dllimport) extern const")
+        } else {
+            consumer
+        };
         fs::write(folder.join("consumer.c"), consumer).unwrap();
-        run(
-            &folder,
-            &format!("{bin}/clang"),
-            &[
-                "-target",
-                target.triple(),
-                target.clang_cpu(),
-                "-isysroot",
-                sdk,
-                "-mmacosx-version-min=14.0",
-                "-std=c11",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "consumer.c",
-                "-L.",
-                "-lzeb_runtime",
-                "-Wl,-rpath,@loader_path",
-                "-o",
-                "consumer",
-            ],
-        );
+        let mut args: Vec<String> = ["-std=c11", "-Wall", "-Wextra", "-Werror", "consumer.c"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        args.extend([
+            tools.import_library(&runtime),
+            "-o".into(),
+            target.executable("consumer"),
+        ]);
+        args.extend(tools.loader_args(target));
+        args.extend(tools.linker_args(target));
+        tools.clang(&folder, target, &args).unwrap();
         let mut game = llvm::emit_with_runtime(&ast, target, symbol).unwrap();
         game += "\ndefine i32 @main() {\n  %a = call %out @zfn0(i64 176093659138)\n  %av = extractvalue %out %a, 0\n  %ae = extractvalue %out %a, 1\n  %avok = icmp eq i64 %av, 180388626434\n  %aeok = icmp eq i32 %ae, 0\n  %aok = and i1 %avok, %aeok\n  %b = call %out @zfn0(i64 1)\n  %be = extractvalue %out %b, 1\n  %bs = extractvalue %out %b, 2\n  %beok = icmp eq i32 %be, 1\n  %bsok = icmp eq i64 %bs, 12\n  %bok = and i1 %beok, %bsok\n  %c = call %out @zfn1(i64 4294967297)\n  %ce = extractvalue %out %c, 1\n  %cok = icmp eq i32 %ce, 1\n  %abok = and i1 %aok, %bok\n  %allok = and i1 %abok, %cok\n  %exit = select i1 %allok, i32 0, i32 1\n  ret i32 %exit\n}\n";
+        if target.is_windows() {
+            game = game.replace(
+                "external constant %scalar_api",
+                "external dllimport constant %scalar_api",
+            );
+        }
         fs::write(folder.join("game.ll"), game).unwrap();
         run(
             &folder,
-            &format!("{bin}/opt"),
+            &tools.tool("opt"),
             &["-passes=verify", "-disable-output", "game.ll"],
         );
         for optimization in ["-O0", "-O2"] {
-            run(
-                &folder,
-                &format!("{bin}/clang"),
-                &[
-                    "-target",
-                    target.triple(),
-                    target.clang_cpu(),
-                    "-isysroot",
-                    sdk,
-                    "-mmacosx-version-min=14.0",
-                    optimization,
-                    "game.ll",
-                    "-L.",
-                    "-lzeb_runtime",
-                    "-Wl,-rpath,@loader_path",
-                    "-o",
-                    &format!("game{optimization}"),
-                ],
-            );
+            let mut args = tools.linker_args(target);
+            args.extend(tools.loader_args(target));
+            args.extend([
+                optimization.into(),
+                "game.ll".into(),
+                tools.import_library(&runtime),
+                "-o".into(),
+                target.executable(&format!("game{optimization}")),
+            ]);
+            tools.clang(&folder, target, &args).unwrap();
             if common::runs_on_host(arch) {
-                run(&folder, &format!("./game{optimization}"), &[]);
+                run(
+                    &folder,
+                    folder
+                        .join(target.executable(&format!("game{optimization}")))
+                        .to_str()
+                        .unwrap(),
+                    &[],
+                );
             }
         }
         let mut bad = llvm::emit_with_runtime(&ast, target, symbol).unwrap();
@@ -159,58 +149,54 @@ fn safe_runtime_dylib_links_from_generated_llvm_and_c() {
                 "#include <stdint.h>\nstruct scalar_api {{ uint32_t version,size; uint32_t (*classify)(uint64_t); }};\nconst struct scalar_api {symbol} = {{ {version}, {size}, 0 }};\n"
             );
             fs::write(folder.join(format!("{name}.c")), fake).unwrap();
-            run(
-                &folder,
-                &format!("{bin}/clang"),
-                &[
-                    "-target",
-                    target.triple(),
-                    target.clang_cpu(),
-                    "-isysroot",
-                    sdk,
-                    "-mmacosx-version-min=14.0",
-                    "-O2",
-                    "bad-api.ll",
-                    &format!("{name}.c"),
-                    "-o",
-                    name,
-                ],
-            );
+            let mut args = tools.linker_args(target);
+            args.extend([
+                "-O2".into(),
+                "bad-api.ll".into(),
+                format!("{name}.c"),
+                "-o".into(),
+                target.executable(name),
+            ]);
+            tools.clang(&folder, target, &args).unwrap();
             if common::runs_on_host(arch) {
-                run(&folder, &format!("./{name}"), &[]);
+                run(
+                    &folder,
+                    folder.join(target.executable(name)).to_str().unwrap(),
+                    &[],
+                );
             }
         }
-        let closure = run(
-            &folder,
-            &tools.otool,
-            &["-L", "libzeb_runtime.dylib", "consumer", "game-O2"],
-        );
+        let closure = tools
+            .dependencies(
+                &folder,
+                &[
+                    &runtime,
+                    &target.executable("consumer"),
+                    &target.executable("game-O2"),
+                ],
+            )
+            .unwrap();
         assert!(!closure.contains("/opt/local/") && !closure.contains("/usr/local/"));
         fs::write(folder.join("dependencies.txt"), closure).unwrap();
         if common::runs_on_host(arch) {
-            run(&folder, "./consumer", &[]);
+            run(
+                &folder,
+                folder.join(target.executable("consumer")).to_str().unwrap(),
+                &[],
+            );
         }
     }
-    for artifact in ["libzeb_runtime.dylib", "consumer", "game-O0", "game-O2"] {
-        run(
-            &dir,
-            &tools.lipo,
-            &[
-                "-create",
-                &format!("x86_64/{artifact}"),
-                &format!("arm64/{artifact}"),
-                "-output",
-                artifact,
-            ],
-        );
-        run(
-            &dir,
-            &tools.lipo,
-            &[artifact, "-verify_arch", "x86_64", "arm64"],
-        );
-    }
-    for artifact in ["consumer", "game-O0", "game-O2"] {
-        run(&dir, &format!("./{artifact}"), &[]);
+    let files = [
+        runtime,
+        tools.host.executable("consumer"),
+        tools.host.executable("game-O0"),
+        tools.host.executable("game-O2"),
+    ];
+    tools
+        .assemble(&dir, &files.iter().map(String::as_str).collect::<Vec<_>>())
+        .unwrap();
+    for artifact in &files[1..] {
+        run(&dir, dir.join(artifact).to_str().unwrap(), &[]);
     }
     println!("safe runtime linked artifacts: {}", dir.display());
 }

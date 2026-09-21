@@ -163,6 +163,8 @@ fn llvm_inspection_targets_are_explicit_and_build_requires_output() {
     for (target, triple) in [
         ("macos-x86_64", "x86_64-apple-macosx14.0.0"),
         ("macos-arm64", "arm64-apple-macosx14.0.0"),
+        ("linux-x86_64", "x86_64-unknown-linux-gnu"),
+        ("windows-x86_64", "x86_64-pc-windows-msvc"),
     ] {
         // The scalar profile belongs to the ownership model: under lifetimes
         // `+` is polymorphic and the runtime decides by tag, which the scalar
@@ -178,7 +180,9 @@ fn llvm_inspection_targets_are_explicit_and_build_requires_output() {
             "ownership",
         ]);
         assert!(output.status.success());
-        let text = String::from_utf8(output.stdout).unwrap();
+        let text = String::from_utf8(output.stdout)
+            .unwrap()
+            .replace("\r\n", "\n");
         assert!(text.contains(triple));
         assert!(text.contains("define internal %out @zfn0"));
         assert!(text.contains("ret %out { i64 0, i32 2"));
@@ -201,7 +205,7 @@ fn llvm_inspection_targets_are_explicit_and_build_requires_output() {
 }
 
 #[test]
-#[ignore = "requires LLVM 22.1.8 and the macOS SDK"]
+#[ignore = "requires LLVM 22.1.8 and host native prerequisites"]
 fn universal_scalar_build_preserves_existing_outputs() {
     let fixture = Fixture::new();
     fs::write(
@@ -216,11 +220,20 @@ fn universal_scalar_build_preserves_existing_outputs() {
         String::from_utf8_lossy(&result.stderr)
     );
     let manifest = fs::read(fixture.0.join("bundle/manifest.json")).unwrap();
-    assert!(String::from_utf8_lossy(&manifest).contains("macos-universal"));
-    let status = Command::new(fixture.0.join("bundle/program"))
-        .current_dir(&fixture.0)
-        .status()
-        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&manifest)
+            .contains(zeb_frontend::llvm::Target::host().unwrap().bundle_name())
+    );
+    let status = Command::new(
+        fixture.0.join("bundle").join(
+            zeb_frontend::llvm::Target::host()
+                .unwrap()
+                .executable("program"),
+        ),
+    )
+    .current_dir(&fixture.0)
+    .status()
+    .unwrap();
     assert_eq!(status.code(), Some(17));
     let second = fixture.run(&["build", "game.t", "--out-dir", "bundle"]);
     assert_eq!(second.status.code(), Some(1));
@@ -300,10 +313,16 @@ fn shared_scalar_bundle_runs_consumer_and_reports_source_error() {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        let output = Command::new(fixture.0.join(name).join("consumer"))
-            .current_dir(&fixture.0)
-            .output()
-            .unwrap();
+        let output = Command::new(
+            fixture.0.join(name).join(
+                zeb_frontend::llvm::Target::host()
+                    .unwrap()
+                    .executable("consumer"),
+            ),
+        )
+        .current_dir(&fixture.0)
+        .output()
+        .unwrap();
         assert_eq!(output.status.code(), Some(status));
         assert_eq!(
             String::from_utf8(if status == 0 {

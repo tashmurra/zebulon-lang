@@ -6,21 +6,11 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use zeb_frontend::llvm::Target;
 
 pub const RUST_VERSION: &str = "1.98.1";
 pub const LLVM_VERSION: &str = "22.1.8";
 pub const TARGETS: [&str; 2] = ["x86_64-apple-darwin", "aarch64-apple-darwin"];
-const LLVM_TOOLS: [&str; 8] = [
-    "opt",
-    "clang",
-    "llvm-ar",
-    "llvm-nm",
-    "llvm-dis",
-    "llvm-objdump",
-    "llvm-lipo",
-    "ld64.lld",
-];
-
 #[derive(Clone, Debug, Default)]
 pub struct Options {
     pub llvm_config: Option<String>,
@@ -53,6 +43,7 @@ impl Options {
 
 #[derive(Clone, Debug)]
 pub struct Toolchain {
+    pub host: Target,
     pub bin: String,
     pub sdk: String,
     pub rustc: String,
@@ -98,6 +89,12 @@ fn find_program(
     dir: &Path,
     search: Option<&std::ffi::OsStr>,
 ) -> Result<String, String> {
+    let expanded = if cfg!(windows) && Path::new(name).extension().is_none() {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    };
+    let name = expanded.as_str();
     if name.is_empty() {
         return Err("configured executable is empty".into());
     }
@@ -139,12 +136,9 @@ fn check_version(label: &str, actual: &str, expected: &str) -> Result<(), String
         ))
     }
 }
+#[cfg(test)]
 fn host_target(os: &str, arch: &str) -> Result<&'static str, String> {
-    match (os, arch) {
-        ("macos", "x86_64") => Ok(TARGETS[0]),
-        ("macos", "aarch64") => Ok(TARGETS[1]),
-        _ => Err("native builds require Intel or Apple Silicon macOS".into()),
-    }
+    Target::for_host(os, arch).map(Target::rust_triple)
 }
 fn directory_files(path: &Path, suffixes: &[&str]) -> Result<Vec<PathBuf>, String> {
     let entries = fs::read_dir(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -164,7 +158,11 @@ fn target_libraries(dir: &Path, rustc: &str, target: &str) -> Result<Vec<PathBuf
         rustc,
         &["--print", "target-libdir", "--target", target],
     )?;
-    let files = directory_files(Path::new(&path), &[".rlib", ".dylib"]).map_err(|e| {
+    let files = directory_files(
+        Path::new(&path),
+        &[".rlib", ".dylib", ".so", ".dll", ".lib"],
+    )
+    .map_err(|e| {
         format!(
             "Rust target {target} is unavailable: {e}; install it with rustup target add {target}"
         )
@@ -179,33 +177,10 @@ fn target_libraries(dir: &Path, rustc: &str, target: &str) -> Result<Vec<PathBuf
     }
     Ok(files)
 }
-fn fingerprints(dir: &Path, paths: &[PathBuf]) -> Result<Json, String> {
+fn fingerprints(_dir: &Path, paths: &[PathBuf]) -> Result<Json, String> {
     let mut result = BTreeMap::new();
-    for chunk in paths.chunks(48) {
-        let paths = chunk
-            .iter()
-            .map(|p| {
-                file(p)?;
-                text(p)
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let mut args = vec!["-a", "256", "--"];
-        args.extend(paths.iter().map(String::as_str));
-        let hashes = output(dir, "/usr/bin/shasum", &args)?;
-        let lines: Vec<_> = hashes.lines().collect();
-        if lines.len() != paths.len() {
-            return Err("unexpected tool fingerprint count".into());
-        }
-        for (path, line) in paths.into_iter().zip(lines) {
-            let digest = line
-                .split_whitespace()
-                .next()
-                .ok_or("missing tool fingerprint")?;
-            if digest.len() != 64 || !digest.bytes().all(|c| c.is_ascii_hexdigit()) {
-                return Err("invalid tool fingerprint".into());
-            }
-            result.insert(path, Json::Str(digest.to_owned()));
-        }
+    for path in paths {
+        result.insert(text(path)?, Json::Str(crate::digest::file(path)?));
     }
     Ok(Json::Obj(result.into_iter().collect()))
 }
@@ -214,7 +189,7 @@ impl Toolchain {
         Self::resolve_with(dir, &Options::from_env()?)
     }
     pub fn resolve_with(dir: &Path, options: &Options) -> Result<Self, String> {
-        let host = host_target(env::consts::OS, env::consts::ARCH)?;
+        let host = Target::host()?;
         let dir = dir.canonicalize().map_err(|e| e.to_string())?;
         let path = env::var_os("PATH");
         let caller_dir =
@@ -230,8 +205,24 @@ impl Toolchain {
             return Err("llvm-config --bindir must return an absolute path".into());
         }
         let mut inputs = vec![PathBuf::from(&llvm)];
-        for tool in LLVM_TOOLS {
-            let full = Path::new(&bin).join(tool);
+        let mut required = vec![
+            "opt",
+            "clang",
+            "llvm-ar",
+            "llvm-nm",
+            "llvm-dis",
+            "llvm-objdump",
+            "llvm-readobj",
+        ];
+        required.extend(if host.is_macos() {
+            vec!["llvm-lipo", "ld64.lld"]
+        } else if host.is_windows() {
+            vec!["lld-link"]
+        } else {
+            vec!["ld.lld"]
+        });
+        for tool in required {
+            let full = Path::new(&bin).join(host.executable(tool));
             if !executable(&full) {
                 return Err(format!(
                     "LLVM installation is missing executable {tool}: {}",
@@ -246,7 +237,10 @@ impl Toolchain {
             inputs.push(full);
         }
         let libdir = output(&dir, &llvm, &["--libdir"])?;
-        inputs.extend(directory_files(Path::new(&libdir), &[".dylib"])?);
+        inputs.extend(directory_files(
+            Path::new(&libdir),
+            &[".dylib", ".so", ".dll"],
+        )?);
         let selected_rustc = find_program(
             options.rustc.as_deref().unwrap_or("rustc"),
             &caller_dir,
@@ -261,7 +255,11 @@ impl Toolchain {
         let sysroot = output(&dir, &selected_rustc, &["--print", "sysroot"])?;
         // Use the selected compiler's real binary rather than a rustup proxy whose
         // selection could change when a build executes in another directory.
-        let rustc = text(&Path::new(&sysroot).join("bin/rustc"))?;
+        let rustc = text(
+            &Path::new(&sysroot)
+                .join("bin")
+                .join(host.executable("rustc")),
+        )?;
         check_version(
             "resolved rustc",
             &output(&dir, &rustc, &["--version"])?,
@@ -270,31 +268,76 @@ impl Toolchain {
         inputs.extend([PathBuf::from(&selected_rustc), PathBuf::from(&rustc)]);
         inputs.extend(directory_files(
             &Path::new(&sysroot).join("lib"),
-            &[".dylib"],
+            &[".dylib", ".so", ".dll"],
         )?);
-        for target in TARGETS {
-            inputs.extend(target_libraries(&dir, &rustc, target)?);
+        for target in host.slices() {
+            inputs.extend(target_libraries(&dir, &rustc, target.rust_triple())?);
         }
-        let sdk = match &options.sdk {
-            Some(path) => text(
-                &Path::new(path)
-                    .canonicalize()
-                    .map_err(|e| format!("invalid SDKROOT {path}: {e}"))?,
-            )?,
-            None => output(
-                &dir,
-                "/usr/bin/xcrun",
-                &["--sdk", "macosx", "--show-sdk-path"],
-            )?,
+        let sdk = if host.is_macos() {
+            match &options.sdk {
+                Some(path) => text(
+                    &Path::new(path)
+                        .canonicalize()
+                        .map_err(|e| format!("invalid SDKROOT {path}: {e}"))?,
+                )?,
+                None => output(
+                    &dir,
+                    "/usr/bin/xcrun",
+                    &["--sdk", "macosx", "--show-sdk-path"],
+                )?,
+            }
+        } else {
+            String::new()
         };
-        for name in ["SDKSettings.json", "usr/lib/libSystem.tbd"] {
-            let path = Path::new(&sdk).join(name);
-            file(&path)?;
-            inputs.push(path);
+        if host.is_macos() {
+            for name in ["SDKSettings.json", "usr/lib/libSystem.tbd"] {
+                let path = Path::new(&sdk).join(name);
+                file(&path)?;
+                inputs.push(path);
+            }
         }
-        let lipo = output(&dir, "/usr/bin/xcrun", &["--find", "lipo"])?;
-        let otool = output(&dir, "/usr/bin/xcrun", &["--find", "otool"])?;
-        inputs.extend([PathBuf::from(&lipo), PathBuf::from(&otool)]);
+        let lipo = if host.is_macos() {
+            output(&dir, "/usr/bin/xcrun", &["--find", "lipo"])?
+        } else {
+            String::new()
+        };
+        let otool = if host.is_macos() {
+            output(&dir, "/usr/bin/xcrun", &["--find", "otool"])?
+        } else {
+            String::new()
+        };
+        if host.is_macos() {
+            inputs.extend([PathBuf::from(&lipo), PathBuf::from(&otool)]);
+        }
+        let clang = text(&Path::new(&bin).join(host.executable("clang")))?;
+        if host == Target::LinuxX86_64 {
+            for name in ["crt1.o", "crti.o", "crtn.o", "libc.so", "libgcc_s.so.1"] {
+                let path = output(&dir, &clang, &[&format!("--print-file-name={name}")])?;
+                let path = PathBuf::from(path);
+                if !path.is_absolute() {
+                    return Err(format!(
+                        "missing Linux development library {name}; install the host C/C++ development toolchain"
+                    ));
+                }
+                file(&path)?;
+                inputs.push(path);
+            }
+        }
+        if host.is_windows() {
+            for variable in ["INCLUDE", "LIB"] {
+                let value = env::var_os(variable).ok_or_else(|| format!("{variable} is missing; run from an x64 Visual Studio Developer PowerShell with the Windows SDK installed"))?;
+                for directory in env::split_paths(&value) {
+                    inputs.extend(directory_files(
+                        &directory,
+                        if variable == "LIB" {
+                            &[".lib"]
+                        } else {
+                            &[".h"]
+                        },
+                    )?);
+                }
+            }
+        }
         inputs.sort();
         inputs.dedup();
         let lock_json = Json::Obj(vec![
@@ -305,16 +348,25 @@ impl Toolchain {
         ])
         .render();
         let profile_json = Json::Obj(vec![
-            ("host".into(), Json::Str(host.into())),
+            ("host".into(), Json::Str(host.rust_triple().into())),
             ("sdk".into(), Json::Str(sdk.clone())),
-            ("deployment".into(), Json::Str("14.0".into())),
+            (
+                "deployment".into(),
+                Json::Str(if host.is_macos() { "14.0" } else { "host" }.into()),
+            ),
             (
                 "targets".into(),
-                Json::Arr(TARGETS.into_iter().map(|t| Json::Str(t.into())).collect()),
+                Json::Arr(
+                    host.slices()
+                        .iter()
+                        .map(|t| Json::Str(t.rust_triple().into()))
+                        .collect(),
+                ),
             ),
         ])
         .render();
         Ok(Self {
+            host,
             bin,
             sdk,
             rustc,
@@ -344,7 +396,15 @@ mod tests {
     fn both_mac_hosts_and_no_other_platforms() {
         assert_eq!(host_target("macos", "x86_64").unwrap(), TARGETS[0]);
         assert_eq!(host_target("macos", "aarch64").unwrap(), TARGETS[1]);
-        assert!(host_target("linux", "x86_64").is_err());
+        assert_eq!(
+            host_target("linux", "x86_64").unwrap(),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            host_target("windows", "x86_64").unwrap(),
+            "x86_64-pc-windows-msvc"
+        );
+        assert!(host_target("linux", "aarch64").is_err());
     }
     #[test]
     fn explicit_missing_program_does_not_fall_back() {

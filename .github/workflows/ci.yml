@@ -3,11 +3,21 @@ on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 jobs:
-  macos:
+  native:
+    name: Native build (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15-intel, macos-15]
+        include:
+          - os: ubuntu-24.04
+            artifact: zebc-linux-x86_64
+            binary: target/release/zebc
+          - os: windows-2025
+            artifact: zebc-windows-x86_64
+            binary: target/release/zebc.exe
+          - os: macos-15
+            artifact: zebc-macos-arm64
+            binary: target/release/zebc
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     steps:
@@ -15,28 +25,42 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Initialize Windows SDK and MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
       - name: Install Rust toolchain
-        run: |
-          rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
-          rustup target add --toolchain 1.98.1 x86_64-apple-darwin aarch64-apple-darwin
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+      - name: Install macOS target libraries
+        if: runner.os == 'macOS'
+        run: rustup target add --toolchain 1.98.1 x86_64-apple-darwin aarch64-apple-darwin
       - name: Install LLVM build prerequisites
-        if: runner.arch == 'X64'
-        run: brew install cmake ninja
+        run: python -m pip install cmake ninja
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/zeb-llvm
-          key: llvm-22.1.8-${{ runner.os }}-${{ runner.arch }}-v1
+          key: llvm-22.1.8-${{ runner.os }}-${{ runner.arch }}-native-v2
       - name: Configure LLVM
+        shell: bash
         run: |
-          python3 tools/bootstrap_llvm.py "$RUNNER_TEMP/zeb-llvm" > "$RUNNER_TEMP/llvm-setup.log"
-          tail -n 1 "$RUNNER_TEMP/llvm-setup.log" > "$RUNNER_TEMP/llvm-env.sh"
-          source "$RUNNER_TEMP/llvm-env.sh"
-          echo "ZEB_LLVM_CONFIG=$ZEB_LLVM_CONFIG" >> "$GITHUB_ENV"
-      - name: Check source and Rust tests
-        run: |
-          cargo fmt --all -- --check
-          cargo test --workspace --locked
-          cargo clippy --workspace --all-targets --locked -- -D warnings
-          python3 tools/check_repository.py
+          python tools/bootstrap_llvm.py "$RUNNER_TEMP/zeb-llvm" --config-out "$RUNNER_TEMP/zeb-llvm.json"
+          python -c 'import json, os; p=json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "zeb-llvm.json"))); print("ZEB_LLVM_CONFIG=" + p["llvm_config"])' >> "$GITHUB_ENV"
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Check repository
+        run: python -X utf8 tools/check_repository.py
+      - name: Build release compiler and runtime
+        run: cargo build --workspace --release --locked
       - name: Run native tests on the host architecture
         run: cargo test -p zebc --locked -- --ignored --test-threads=1
+      - name: Upload compiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error

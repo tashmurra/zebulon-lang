@@ -2,6 +2,7 @@
 """Install pinned upstream LLVM below a user-selected directory, without sudo."""
 import argparse
 import hashlib
+import json
 from pathlib import Path
 import platform
 import shutil
@@ -20,12 +21,15 @@ ARCHIVES = {
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--config-out", type=Path, help="write resolved tools as JSON")
     args = parser.parse_args()
     if sys.version_info < (3, 12):
         parser.error("Python 3.12+ is required for safe archive extraction")
-    arch = platform.machine()
-    if platform.system() != "Darwin" or arch not in ARCHIVES:
-        parser.error("this bootstrap supports Intel and Apple Silicon macOS")
+    system = platform.system()
+    arch = platform.machine().lower()
+    if arch == "amd64": arch = "x86_64"
+    if (system, arch) not in {( "Darwin", "arm64"), ("Darwin", "x86_64"), ("Linux", "x86_64"), ("Windows", "x86_64")}:
+        parser.error("supported hosts: macOS Intel/ARM64, Linux x86-64, Windows x86-64")
     root = args.directory.resolve()
     root.mkdir(parents=True, exist_ok=True)
     name, expected = ARCHIVES[arch]
@@ -43,28 +47,33 @@ def main():
     if not source.exists():
         with tarfile.open(archive) as package:
             package.extractall(root, filter="data")
-    if arch == "arm64":
+    if system == "Darwin" and arch == "arm64":
         config = source / "bin/llvm-config"
     else:
         build = root / "build"
         subprocess.run([
             "cmake", "-G", "Ninja", "-S", str(source / "llvm"), "-B", str(build),
             "-DCMAKE_BUILD_TYPE=Release", "-DLLVM_ENABLE_PROJECTS=clang;lld",
-            "-DLLVM_TARGETS_TO_BUILD=X86;AArch64", "-DLLVM_INCLUDE_TESTS=OFF",
+            "-DLLVM_TARGETS_TO_BUILD=" + ("X86;AArch64" if system == "Darwin" else "X86"), "-DLLVM_INCLUDE_TESTS=OFF",
             "-DLLVM_INCLUDE_BENCHMARKS=OFF", "-DLLVM_INCLUDE_EXAMPLES=OFF",
             "-DLLVM_ENABLE_ASSERTIONS=OFF", "-DLLVM_PARALLEL_LINK_JOBS=1",
         ], cwd=root, check=True)
         subprocess.run([
             "cmake", "--build", str(build), "--parallel", "3", "--target",
             "llvm-config", "opt", "clang", "llvm-ar", "llvm-nm", "llvm-dis",
-            "llvm-objdump", "llvm-lipo", "lld",
+            "llvm-objdump", "llvm-readobj", "llvm-lipo", "lld",
         ], cwd=root, check=True)
-        config = build / "bin/llvm-config"
+        config = build / "bin" / ("llvm-config.exe" if system == "Windows" else "llvm-config")
     found = subprocess.check_output([str(config), "--version"], cwd=root, text=True).strip()
     if found != VERSION:
         raise SystemExit(f"expected LLVM {VERSION}, found {found}")
+    if args.config_out:
+        args.config_out.write_text(json.dumps({"llvm_config": str(config)}) + "\n", encoding="utf-8")
     import shlex
-    print("export ZEB_LLVM_CONFIG=" + shlex.quote(str(config)))
+    if system == "Windows":
+        print("$env:ZEB_LLVM_CONFIG = '" + str(config).replace("'", "''") + "'")
+    else:
+        print("export ZEB_LLVM_CONFIG=" + shlex.quote(str(config)))
 
 if __name__ == "__main__":
     main()

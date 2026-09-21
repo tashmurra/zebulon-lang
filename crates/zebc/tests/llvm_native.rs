@@ -39,14 +39,11 @@ fn emission_keeps_checked_outcomes_and_source_coordinates() {
     assert!(!text.contains(" nuw "));
 }
 #[test]
-#[ignore = "requires the installed LLVM 22 candidate, Apple sdk and native macOS host"]
+#[ignore = "requires pinned LLVM and host native prerequisites"]
 fn native_scalar_cases_o0_o2_and_both_architectures() {
-    assert_eq!(std::env::consts::OS, "macos");
     let temporary = common::TempDir::new("llvm_native");
     let dir = temporary.0.clone();
     let tools = common::tools(&dir);
-    let bin = tools.bin.as_str();
-    let sdk = tools.sdk.as_str();
     // Independent source programs and hand-derived expected outcomes. No VM or IR interpreter.
     let cases = [
         ("add", "f(x){return x+1;}", 0, integer(41), integer(42), 0),
@@ -545,7 +542,7 @@ fn native_scalar_cases_o0_o2_and_both_architectures() {
         );
     };
     for (name, source, entry, arg, expected, error) in cases {
-        for target in [Target::MacX86_64, Target::MacArm64] {
+        for &target in tools.host.slices() {
             let triple = target.triple();
             let mut text = llvm(source, target);
             let site = if error == 0 {
@@ -574,45 +571,35 @@ fn native_scalar_cases_o0_o2_and_both_architectures() {
             fs::write(dir.join(&file), text).unwrap();
             run(
                 &dir,
-                &format!("{bin}/opt"),
+                &tools.tool("opt"),
                 &["-passes=verify", "-disable-output", &file],
             );
             for optimization in ["-O0", "-O2"] {
-                let host = matches!(
-                    (std::env::consts::ARCH, target),
-                    ("x86_64", Target::MacX86_64) | ("aarch64", Target::MacArm64)
-                );
-                let output = format!(
-                    "{name}-{triple}{optimization}{}",
-                    if host { "" } else { ".o" }
-                );
-                let mut args = vec![
-                    "-target",
-                    triple,
-                    target.clang_cpu(),
-                    "-isysroot",
-                    sdk,
-                    "-mmacosx-version-min=14.0",
-                    optimization,
-                    &file,
-                    "-o",
-                    &output,
+                let host = target == tools.host;
+                let output = if host {
+                    target.executable(&format!("{name}-{triple}{optimization}"))
+                } else {
+                    format!("{name}-{triple}{optimization}.o")
+                };
+                let mut args: Vec<String> = vec![
+                    optimization.into(),
+                    file.clone(),
+                    "-o".into(),
+                    output.clone(),
                 ];
                 if !host {
-                    args.push("-c");
+                    args.push("-c".into());
+                } else {
+                    args.extend(tools.linker_args(target));
                 }
-                run(&dir, &format!("{bin}/clang"), &args);
+                tools.clang(&dir, target, &args).unwrap();
                 if host {
-                    run(&dir, &format!("./{output}"), &[]);
+                    run(&dir, dir.join(&output).to_str().unwrap(), &[]);
                 }
             }
         }
     }
-    let host_target = if std::env::consts::ARCH == "aarch64" {
-        Target::MacArm64
-    } else {
-        Target::MacX86_64
-    };
+    let host_target = tools.host;
     let mut runaway = llvm("f(x){while(true){continue;}}", host_target);
     runaway += "\ndefine i32 @main() {\n  %r = call %out @zfn0(i64 0)\n  ret i32 0\n}\n";
     if !compare.is_empty() {
@@ -626,29 +613,28 @@ fn native_scalar_cases_o0_o2_and_both_architectures() {
     fs::write(dir.join("runaway.ll"), runaway).unwrap();
     run(
         &dir,
-        &format!("{bin}/opt"),
+        &tools.tool("opt"),
         &["-passes=verify", "-disable-output", "runaway.ll"],
     );
-    run(
-        &dir,
-        &format!("{bin}/clang"),
-        &[
-            "-target",
-            host_target.triple(),
-            host_target.clang_cpu(),
-            "-isysroot",
-            sdk,
-            "-mmacosx-version-min=14.0",
-            "-O0",
-            "runaway.ll",
-            "-o",
-            "runaway",
-        ],
-    );
+    let mut args = tools.linker_args(host_target);
+    args.extend([
+        "-O0".into(),
+        "runaway.ll".into(),
+        "-o".into(),
+        host_target.executable("runaway"),
+    ]);
+    tools.clang(&dir, host_target, &args).unwrap();
     assert!(
-        zebc::process::run(&dir, "./runaway", &[], Duration::from_millis(100))
-            .unwrap_err()
-            .contains("deadline")
+        zebc::process::run(
+            &dir,
+            dir.join(host_target.executable("runaway"))
+                .to_str()
+                .unwrap(),
+            &[],
+            Duration::from_millis(100)
+        )
+        .unwrap_err()
+        .contains("deadline")
     );
     if specialized_only {
         println!("{count} eligible cases directly execute both general and integer entries");

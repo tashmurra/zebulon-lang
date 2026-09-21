@@ -10,21 +10,106 @@ use crate::{
 };
 use std::fmt::{self, Write};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
     MacX86_64,
     MacArm64,
+    LinuxX86_64,
+    WindowsX86_64,
 }
 impl Target {
+    pub fn host() -> Result<Self, String> {
+        Self::for_host(std::env::consts::OS, std::env::consts::ARCH)
+    }
+    pub fn for_host(os: &str, arch: &str) -> Result<Self, String> {
+        match (os, arch) {
+            ("macos", "x86_64") => Ok(Self::MacX86_64),
+            ("macos", "aarch64") => Ok(Self::MacArm64),
+            ("linux", "x86_64") => Ok(Self::LinuxX86_64),
+            ("windows", "x86_64") => Ok(Self::WindowsX86_64),
+            _ => Err(format!("unsupported native host: {os}/{arch}")),
+        }
+    }
+    pub fn is_macos(self) -> bool {
+        matches!(self, Self::MacX86_64 | Self::MacArm64)
+    }
+    pub fn is_windows(self) -> bool {
+        self == Self::WindowsX86_64
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::MacX86_64 => "macos-x86_64",
+            Self::MacArm64 => "macos-arm64",
+            Self::LinuxX86_64 => "linux-x86_64",
+            Self::WindowsX86_64 => "windows-x86_64",
+        }
+    }
+    pub fn arch(self) -> &'static str {
+        if self == Self::MacArm64 {
+            "arm64"
+        } else {
+            "x86_64"
+        }
+    }
+    pub fn rust_triple(self) -> &'static str {
+        match self {
+            Self::MacX86_64 => "x86_64-apple-darwin",
+            Self::MacArm64 => "aarch64-apple-darwin",
+            _ => self.triple(),
+        }
+    }
+    pub fn slices(self) -> &'static [Self] {
+        match self {
+            Self::MacX86_64 | Self::MacArm64 => &[Self::MacX86_64, Self::MacArm64],
+            Self::LinuxX86_64 => &[Self::LinuxX86_64],
+            Self::WindowsX86_64 => &[Self::WindowsX86_64],
+        }
+    }
+    pub fn bundle_name(self) -> &'static str {
+        if self.is_macos() {
+            "macos-universal"
+        } else {
+            self.name()
+        }
+    }
+    pub fn shared_ext(self) -> &'static str {
+        if self.is_macos() {
+            "dylib"
+        } else if self.is_windows() {
+            "dll"
+        } else {
+            "so"
+        }
+    }
+    pub fn object_ext(self) -> &'static str {
+        if self.is_windows() { "obj" } else { "o" }
+    }
+    pub fn archive_ext(self) -> &'static str {
+        if self.is_windows() { "lib" } else { "a" }
+    }
+    pub fn executable(self, name: &str) -> String {
+        if self.is_windows() {
+            format!("{name}.exe")
+        } else {
+            name.into()
+        }
+    }
+    pub fn ir_symbol(self, symbol: &str) -> &str {
+        if self.is_macos() {
+            symbol.strip_prefix('_').unwrap_or(symbol)
+        } else {
+            symbol
+        }
+    }
     pub fn cpu(self) -> &'static str {
         match self {
-            Self::MacX86_64 => "x86-64",
+            Self::MacX86_64 | Self::LinuxX86_64 | Self::WindowsX86_64 => "x86-64",
             Self::MacArm64 => "generic",
         }
     }
     pub fn clang_cpu(self) -> &'static str {
         match self {
-            Self::MacX86_64 => "-march=x86-64",
+            Self::MacX86_64 | Self::LinuxX86_64 | Self::WindowsX86_64 => "-march=x86-64",
             Self::MacArm64 => "-mcpu=generic",
         }
     }
@@ -32,6 +117,8 @@ impl Target {
         match self {
             Self::MacX86_64 => "x86_64-apple-macosx14.0.0",
             Self::MacArm64 => "arm64-apple-macosx14.0.0",
+            Self::LinuxX86_64 => "x86_64-unknown-linux-gnu",
+            Self::WindowsX86_64 => "x86_64-pc-windows-msvc",
         }
     }
 }

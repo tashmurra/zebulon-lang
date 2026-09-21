@@ -78,6 +78,9 @@ fn number(text: &str) -> Result<u64, String> {
 /// not include unreviewed runtime/system calls or prove host stack availability.
 fn reservation(frame: u64, target: Target) -> Result<u64, String> {
     let call = match target {
+        Target::LinuxX86_64 | Target::WindowsX86_64 => {
+            return Err("stack qualification is not validated for this target".into());
+        }
         Target::MacX86_64 => 8,
         Target::MacArm64 => 0,
     };

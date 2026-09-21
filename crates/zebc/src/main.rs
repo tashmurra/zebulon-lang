@@ -18,12 +18,28 @@ const HELP: &str = "zebc — Zebulon compiler\n\
 Usage:\n  zebc capabilities --format json\n  zebc inspect FILE --stage tokens|preprocessed|ast|ir|llvm|object-init-llvm|object-llvm [--encoding auto|utf-8|ascii|latin-1|utf-16le|utf-16be]\n  zebc check FILE\n  zebc build FILE --out-dir NEW_DIRECTORY [--opt O0|O2] [--emit obj|exe|static|shared] [--lto none|full] [--runtime-cache DIR]\n\
 Optional: --include-dir DIR (repeatable); --max-source-bytes N (default 16777216)\n\
   --model ownership|lifetimes selects the memory model (default lifetimes); it applies to inspect, check and build\n\
-check validates supported scalar/object source; build emits universal macOS native bundles.\n";
+check validates supported scalar/object source; build emits host-native bundles (universal on macOS; x86-64 on Linux/Windows).\n";
 
 const CAPABILITIES_TEMPLATE: &str = r#"{"schema":1,"compiler":"zebc","profile":"scalar-flow-v1","source_encodings":["utf-8","ascii","latin-1","utf-16le","utf-16be"],"token_inspection":true,"ast_inspection":true,"named_object_initialization_llvm":true,"scalar_ir_inspection":true,"llvm_inspection":true,"preliminary_semantic_checks":true,"semantic_check":true,"native_compilation":true,"native_profile":"scalar-executable-v1","shared_profile":"scalar-shared-v1","integer_argument_profiles":["scalar-shared-i32-v2","scalar-object-i32-v2","scalar-static-i32-v2"],"object_profile":"scalar-object-v1","static_profile":"scalar-static-v1","lto_modes":{"default":"none","full":"shared-O2-only"},"memory_models":["lifetimes","ownership"],"default_memory_model":"lifetimes","object_shared_profile":"{object_profile}","game_execution":true,"qualified_targets":[]}"#;
 
 fn capabilities() -> String {
-    CAPABILITIES_TEMPLATE.replace("{object_profile}", object_build::PROFILE)
+    {
+        let targets = llvm::Target::host()
+            .map(|t| {
+                t.slices()
+                    .iter()
+                    .map(|t| format!("\"{}\"", t.name()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        CAPABILITIES_TEMPLATE
+            .replace("{object_profile}", object_build::PROFILE)
+            .replace(
+                "\"qualified_targets\":[]",
+                &format!("\"build_targets\":[{targets}],\"qualified_targets\":[]"),
+            )
+    }
 }
 
 fn main() -> ExitCode {
@@ -140,6 +156,8 @@ fn run(args: Vec<OsString>) -> Result<(), (u8, String)> {
                     target = Some(match value {
                         "macos-x86_64" => llvm::Target::MacX86_64,
                         "macos-arm64" => llvm::Target::MacArm64,
+                        "linux-x86_64" => llvm::Target::LinuxX86_64,
+                        "windows-x86_64" => llvm::Target::WindowsX86_64,
                         _ => return Err(usage("unknown scalar LLVM target")),
                     })
                 }
@@ -292,8 +310,14 @@ fn run(args: Vec<OsString>) -> Result<(), (u8, String)> {
     {
         let ast = parser::parse_with(source, model.unwrap_or_default()).map_err(diagnostic)?;
         if stage == Some("object-llvm") {
-            let text = llvm::emit_objects(&ast, target.unwrap_or(llvm::Target::MacX86_64))
-                .map_err(diagnostic)?;
+            let text = llvm::emit_objects(
+                &ast,
+                match target {
+                    Some(t) => t,
+                    None => llvm::Target::host().map_err(|e| (1, e))?,
+                },
+            )
+            .map_err(diagnostic)?;
             return write!(output, "{text}").map_err(io_error);
         }
         if stage == Some("object-init-llvm") {
@@ -358,16 +382,15 @@ fn run(args: Vec<OsString>) -> Result<(), (u8, String)> {
             }
             return Err(diagnostic(Diagnostic::new(
                 "frontend-unavailable",
-                "build requires --out-dir NEW_DIRECTORY (scalar universal executable)",
+                "build requires --out-dir NEW_DIRECTORY (native bundle)",
                 0,
             )));
         }
         if stage == Some("llvm") {
-            let target = target.unwrap_or(if cfg!(target_arch = "aarch64") {
-                llvm::Target::MacArm64
-            } else {
-                llvm::Target::MacX86_64
-            });
+            let target = match target {
+                Some(t) => t,
+                None => llvm::Target::host().map_err(|e| (1, e))?,
+            };
             let module = llvm::emit(&ast, target).map_err(diagnostic)?;
             write!(output, "{module}").map_err(io_error)?;
             return Ok(());

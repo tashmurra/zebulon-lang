@@ -1,4 +1,4 @@
-//! macOS scalar executable driver. No Rust FFI or user-code execution.
+//! Host-native scalar executable driver. No Rust FFI or user-code execution.
 use std::{fs, io::Write, path::Path, time::Duration};
 use zeb_frontend::{
     llvm::{self, Target},
@@ -13,9 +13,7 @@ pub fn build(
     out: &Path,
     optimize: bool,
 ) -> Result<(), String> {
-    if !cfg!(target_os = "macos") {
-        return Err("native build currently requires macOS".to_owned());
-    }
+    let host = Target::host()?;
     let entry = ast
         .functions
         .iter()
@@ -35,7 +33,7 @@ pub fn build(
             llvm::emit(ast, target)
         }
     };
-    let modules = [emit(Target::MacX86_64), emit(Target::MacArm64)];
+    let modules = host.slices().iter().copied().map(emit).collect::<Vec<_>>();
     let modules = modules
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
@@ -45,8 +43,6 @@ pub fn build(
     let result = (|| {
         let tools = Toolchain::resolve(&out)?;
         tools.record(&out)?;
-        let bin = tools.bin.as_str();
-        let sdk = tools.sdk.as_str();
         let timeout = Duration::from_secs(30);
         fs::write(out.join("source.t"), source.original_bytes()).map_err(|e| e.to_string())?;
         fs::write(
@@ -58,32 +54,19 @@ pub fn build(
         let compiler = compiler
             .to_str()
             .ok_or("compiler path must be UTF-8 for this initial driver")?;
-        let tool_hashes = run(
-            &out,
-            "/usr/bin/shasum",
-            &[
-                "-a",
-                "256",
-                compiler,
-                &format!("{bin}/opt"),
-                &format!("{bin}/clang"),
-            ],
-            timeout,
-        )?;
+        let tool_hashes =
+            zebc::digest::sums(&out, &[compiler, &tools.tool("opt"), &tools.tool("clang")])?;
         fs::write(out.join("TOOLS-SHA256SUMS"), tool_hashes).map_err(|e| e.to_string())?;
         for tool in ["opt", "clang"] {
-            let text = run(&out, &format!("{bin}/{tool}"), &["--version"], timeout)?;
+            let text = run(&out, &tools.tool(tool), &["--version"], timeout)?;
             if !text.contains("version 22.1.8") {
                 return Err(format!("{tool} is not LLVM 22.1.8"));
             }
             fs::write(out.join(format!("{tool}-version.txt")), text).map_err(|e| e.to_string())?;
         }
         for (index, mut module) in modules.into_iter().enumerate() {
-            let (arch, target) = if index == 0 {
-                ("x86_64", Target::MacX86_64)
-            } else {
-                ("arm64", Target::MacArm64)
-            };
+            let target = host.slices()[index];
+            let arch = target.arch();
             // Conventional process entry only; game functions retain their internal outcome ABI.
             let cpu = target.cpu();
             module += &format!(
@@ -96,30 +79,23 @@ pub fn build(
             fs::write(out.join(&file), module).map_err(|e| e.to_string())?;
             let verification = run(
                 &out,
-                &format!("{bin}/opt"),
+                &tools.tool("opt"),
                 &["-passes=verify", "-disable-output", &file],
                 timeout,
             )?;
             fs::write(out.join(format!("{arch}-verify.txt")), verification)
                 .map_err(|e| e.to_string())?;
-            let compilation = run(
+            let compilation = tools.clang(
                 &out,
-                &format!("{bin}/clang"),
+                target,
                 &[
-                    "-target",
-                    target.triple(),
-                    target.clang_cpu(),
-                    "-isysroot",
-                    sdk,
-                    "-mmacosx-version-min=14.0",
-                    if optimize { "-O2" } else { "-O0" },
-                    "-fstack-usage",
-                    "-c",
-                    &file,
-                    "-o",
-                    &object,
+                    if optimize { "-O2".into() } else { "-O0".into() },
+                    "-fstack-usage".into(),
+                    "-c".into(),
+                    file.clone(),
+                    "-o".into(),
+                    object.clone(),
                 ],
-                timeout,
             )?;
             fs::write(out.join(format!("{arch}-compile.txt")), compilation)
                 .map_err(|e| e.to_string())?;
@@ -127,63 +103,52 @@ pub fn build(
                 return Err(format!("missing executable frame report: {usage}"));
             }
             // Link the exact object whose code-generation invocation emitted the report.
-            let linkage = run(
-                &out,
-                &format!("{bin}/clang"),
-                &[
-                    "-target",
-                    target.triple(),
-                    target.clang_cpu(),
-                    "-isysroot",
-                    sdk,
-                    "-mmacosx-version-min=14.0",
-                    &object,
-                    "-o",
-                    &exe,
-                ],
-                timeout,
-            )?;
+            let mut args = tools.linker_args(target);
+            args.extend([object, "-o".into(), exe]);
+            let linkage = tools.clang(&out, target, &args)?;
             fs::write(out.join(format!("{arch}-link.txt")), linkage).map_err(|e| e.to_string())?;
         }
-        run(
-            &out,
-            &tools.lipo,
-            &["-create", "x86_64.exe", "arm64.exe", "-output", "program"],
-            timeout,
-        )?;
-        run(
-            &out,
-            &tools.lipo,
-            &["program", "-verify_arch", "x86_64", "arm64"],
-            timeout,
-        )?;
-        let closure = run(&out, &tools.otool, &["-L", "program"], timeout)?;
+        let program = host.executable("program");
+        if host.is_macos() {
+            run(
+                &out,
+                &tools.lipo,
+                &["-create", "x86_64.exe", "arm64.exe", "-output", &program],
+                timeout,
+            )?;
+            run(
+                &out,
+                &tools.lipo,
+                &[&program, "-verify_arch", "x86_64", "arm64"],
+                timeout,
+            )?;
+        } else {
+            fs::copy(out.join("x86_64.exe"), out.join(&program)).map_err(|e| e.to_string())?;
+        }
+        let closure = tools.dependencies(&out, &[&program])?;
         fs::write(out.join("dependencies.txt"), closure).map_err(|e| e.to_string())?;
-        let hashes = run(
-            &out,
-            "/usr/bin/shasum",
-            &[
-                "-a",
-                "256",
-                "source.t",
-                "source-encoding.txt",
-                "native-tool-lock.json",
-                "target-profile.json",
-                "x86_64.ll",
-                "arm64.ll",
-                "x86_64.o",
-                "arm64.o",
-                "x86_64.su",
-                "arm64.su",
-                "x86_64.exe",
-                "arm64.exe",
-                "program",
-            ],
-            timeout,
-        )?;
+        let mut files: Vec<String> = [
+            "source.t",
+            "source-encoding.txt",
+            "native-tool-lock.json",
+            "target-profile.json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        files.push(program.clone());
+        for target in host.slices() {
+            for extension in ["ll", "o", "su", "exe"] {
+                files.push(format!("{}.{extension}", target.arch()));
+            }
+        }
+        let hashes =
+            zebc::digest::sums(&out, &files.iter().map(String::as_str).collect::<Vec<_>>())?;
         fs::write(out.join("SHA256SUMS"), hashes).map_err(|e| e.to_string())?;
+        let bundle_target = host.bundle_name();
+        let deployment = if host.is_macos() { "14.0" } else { "host" };
         let manifest = format!(
-            "{{\"schema\":1,\"status\":\"complete\",\"profile\":\"scalar-executable-v1\",\"target\":\"macos-universal\",\"deployment\":\"14.0\",\"optimization\":\"{}\",\"artifact\":\"program\",\"stack_report_scope\":\"linked-source-object\",\"qualified\":false,\"game_runtime\":false}}\n",
+            "{{\"schema\":1,\"status\":\"complete\",\"profile\":\"scalar-executable-v1\",\"target\":\"{bundle_target}\",\"deployment\":\"{deployment}\",\"optimization\":\"{}\",\"artifact\":\"{program}\",\"stack_report_scope\":\"linked-source-object\",\"qualified\":false,\"game_runtime\":false}}\n",
             if optimize { "O2" } else { "O0" }
         );
         let mut file = fs::File::create(out.join("manifest.pending")).map_err(|e| e.to_string())?;

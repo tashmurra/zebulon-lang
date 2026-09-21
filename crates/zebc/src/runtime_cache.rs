@@ -5,7 +5,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -20,12 +19,12 @@ pub fn identity(parts: &[&str]) -> String {
 }
 
 fn checksum(dir: &Path, runtime: &str) -> Result<String, String> {
-    crate::process::run(
-        dir,
-        "/usr/bin/shasum",
-        &["-a", "256", runtime, "rust-build.txt"],
-        Duration::from_secs(30),
-    )
+    let mut names = vec![runtime, "rust-build.txt"];
+    let import = format!("{runtime}.lib");
+    if runtime.ends_with(".dll") {
+        names.push(&import);
+    }
+    crate::digest::sums(dir, &names)
 }
 
 /// An absent entry is a miss. A damaged published entry is an explicit error,
@@ -44,6 +43,10 @@ pub fn restore(entry: &Path, out: &Path, runtime: &str) -> Result<bool, String> 
         fs::copy(entry.join(runtime), out.join(runtime)).map_err(|e| e.to_string())?;
         fs::copy(entry.join("rust-build.txt"), out.join("rust-build.txt"))
             .map_err(|e| e.to_string())?;
+        if runtime.ends_with(".dll") {
+            let import = format!("{runtime}.lib");
+            fs::copy(entry.join(&import), out.join(&import)).map_err(|e| e.to_string())?;
+        }
         // Validate the copies as well, before the caller links them.
         if checksum(out, runtime)? != expected {
             return Err("copied entry checksum mismatch".into());
@@ -83,6 +86,10 @@ pub fn publish(entry: &Path, out: &Path, runtime: &str) -> Result<(), String> {
     };
     for file in [runtime, "rust-build.txt"] {
         fs::copy(out.join(file), temp.0.join(file)).map_err(|e| e.to_string())?;
+    }
+    if runtime.ends_with(".dll") {
+        let import = format!("{runtime}.lib");
+        fs::copy(out.join(&import), temp.0.join(&import)).map_err(|e| e.to_string())?;
     }
     let sums = checksum(&temp.0, runtime)?;
     fs::write(temp.0.join("SHA256SUMS"), &sums).map_err(|e| e.to_string())?;
@@ -158,17 +165,7 @@ mod tests {
         fs::write(out.join("rust-build.txt"), b"").unwrap();
         let key = |parts: &[&str]| {
             fs::write(out.join("identity"), identity(parts)).unwrap();
-            crate::process::run(
-                &out,
-                "/usr/bin/shasum",
-                &["-a", "256", "identity"],
-                Duration::from_secs(30),
-            )
-            .unwrap()
-            .split_whitespace()
-            .next()
-            .unwrap()
-            .to_owned()
+            crate::digest::file(&out.join("identity")).unwrap()
         };
         let original = key(&["source", "tool hash", "recipe O0"]);
         let entry = root.0.join("cache").join(&original).join("x86_64");
