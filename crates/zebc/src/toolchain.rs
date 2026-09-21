@@ -20,9 +20,12 @@ pub struct Options {
 }
 impl Options {
     pub fn from_env() -> Result<Self, String> {
-        fn first(names: &[&str]) -> Result<Option<String>, String> {
+        Self::from_lookup(|name| env::var_os(name))
+    }
+    fn from_lookup(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<Self, String> {
+        let first = |names: &[&str]| -> Result<Option<String>, String> {
             for name in names {
-                if let Some(value) = env::var_os(name) {
+                if let Some(value) = lookup(name) {
                     let value = value
                         .into_string()
                         .map_err(|_| format!("{name} must be valid UTF-8"))?;
@@ -33,10 +36,10 @@ impl Options {
                 }
             }
             Ok(None)
-        }
+        };
         Ok(Self {
             llvm_config: first(&["ZEB_LLVM_CONFIG", "LLVM_CONFIG"])?,
-            ld64_lld: first(&["ZEB_LD64_LLD"])?,
+            ld64_lld: first(&["ZEB_LD64_LLD", "ZEB_LLD"])?,
             rustc: first(&["ZEB_RUSTC", "RUSTC"])?,
             sdk: first(&["SDKROOT"])?,
         })
@@ -442,6 +445,46 @@ impl Toolchain {
 mod tests {
     use super::*;
     #[test]
+    fn lld_environment_alias_has_explicit_precedence() {
+        let options = |primary: Option<&str>, alias: Option<&str>| {
+            Options::from_lookup(|name| match name {
+                "ZEB_LD64_LLD" => primary.map(Into::into),
+                "ZEB_LLD" => alias.map(Into::into),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            options(None, Some("separate/ld64.lld"))
+                .unwrap()
+                .ld64_lld
+                .as_deref(),
+            Some("separate/ld64.lld")
+        );
+        assert_eq!(
+            options(Some("primary/ld64.lld"), Some("alias/ld64.lld"))
+                .unwrap()
+                .ld64_lld
+                .as_deref(),
+            Some("primary/ld64.lld")
+        );
+        assert_eq!(
+            options(Some("primary/ld64.lld"), Some(""))
+                .unwrap()
+                .ld64_lld
+                .as_deref(),
+            Some("primary/ld64.lld")
+        );
+        assert!(options(None, None).unwrap().ld64_lld.is_none());
+        assert_eq!(
+            options(Some(""), Some("alias/ld64.lld")).unwrap_err(),
+            "ZEB_LD64_LLD is set but empty"
+        );
+        assert_eq!(
+            options(None, Some("")).unwrap_err(),
+            "ZEB_LLD is set but empty"
+        );
+    }
+    #[test]
     #[cfg(unix)]
     fn separate_lld_selection_validation_and_fingerprints() {
         use std::os::unix::fs::PermissionsExt;
@@ -457,6 +500,24 @@ mod tests {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
         };
         script(&separate, LLVM_VERSION);
+        let options = Options::from_lookup(|name| {
+            (name == "ZEB_LLD").then(|| separate.as_os_str().to_owned())
+        })
+        .unwrap();
+        // The configured alias must work with neither a bundled linker nor PATH.
+        let mut alias_inputs = Vec::new();
+        assert_eq!(
+            resolve_ld64_lld(
+                &dir,
+                &bin,
+                options.ld64_lld.as_deref(),
+                None,
+                &mut alias_inputs
+            )
+            .unwrap(),
+            text(&separate).unwrap()
+        );
+        assert_eq!(alias_inputs, std::slice::from_ref(&separate));
         let search = env::join_paths([&lld_bin]).unwrap();
         let mut inputs = Vec::new();
         let found = resolve_ld64_lld(&dir, &bin, None, Some(&search), &mut inputs).unwrap();

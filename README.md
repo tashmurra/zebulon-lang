@@ -20,7 +20,7 @@ LLVM may be installed anywhere. Put the required `llvm-config` on `PATH`, or set
 | Setting | Selection |
 | --- | --- |
 | LLVM | `ZEB_LLVM_CONFIG`, otherwise `LLVM_CONFIG`, otherwise `llvm-config` on `PATH` |
-| macOS LLD | `ZEB_LD64_LLD`, otherwise `ld64.lld` in LLVM's bin directory, otherwise `ld64.lld` on `PATH` |
+| macOS LLD | `ZEB_LD64_LLD`, otherwise `ZEB_LLD` (compatibility alias), otherwise `ld64.lld` in LLVM's bin directory, otherwise `ld64.lld` on `PATH` |
 | Rust | `ZEB_RUSTC`, otherwise `RUSTC`, otherwise `rustc` on `PATH` |
 | macOS SDK | `SDKROOT`, otherwise `xcrun --sdk macosx --show-sdk-path` |
 | Apple tools | `DEVELOPER_DIR` when set, otherwise the developer tools selected by the system |

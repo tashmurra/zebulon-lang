@@ -48,6 +48,77 @@ fn result(bundle: &Path, args: &[&str]) -> (i32, String, String) {
 #[test]
 #[cfg(target_os = "macos")]
 #[ignore = "requires pinned LLVM and both macOS Rust targets"]
+fn lld_alias_builds_full_lto_without_a_path_or_bundled_linker() {
+    use zebc::manifest::Json;
+    let tmp = TempDir::new("lld-alias");
+    let tools = common::tools(&tmp.0);
+    let (config, lld) = common::split_llvm_lld(&tmp.0, tools);
+    fs::write(tmp.0.join("scalar.t"), "main(){return 17;}").unwrap();
+    let compile = |name: &str, alias: Option<&Path>| {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zebc"));
+        command
+            .current_dir(&tmp.0)
+            .args([
+                "build",
+                "scalar.t",
+                "--emit",
+                "shared",
+                "--opt",
+                "O2",
+                "--lto",
+                "full",
+                "--out-dir",
+                name,
+            ])
+            .env("PATH", "/usr/bin:/bin")
+            .env("ZEB_LLVM_CONFIG", &config)
+            .env("ZEB_RUSTC", &tools.rustc)
+            .env("SDKROOT", &tools.sdk)
+            .env_remove("ZEB_LD64_LLD")
+            .env_remove("ZEB_LLD");
+        if let Some(alias) = alias {
+            command.env("ZEB_LLD", alias);
+        }
+        command.output().unwrap()
+    };
+    // First prove that automatic discovery cannot conceal an ignored alias.
+    let missing = compile("missing", None);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("cannot find executable ld64.lld"));
+    let built = compile("full-lto", Some(&lld));
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let bundle = tmp.0.join("full-lto");
+    assert_eq!(result(&bundle, &[]), (0, "17\n".into(), "".into()));
+    let lock = fs::read_to_string(bundle.join("native-tool-lock.json")).unwrap();
+    let entry = format!(
+        "{}: {}",
+        Json::Str(lld.to_str().unwrap().into()).render().trim(),
+        Json::Str(zebc::digest::file(&lld).unwrap()).render().trim()
+    );
+    assert!(
+        lock.contains(&entry),
+        "selected linker fingerprint is missing"
+    );
+    assert!(
+        fs::read_to_string(bundle.join("identity.txt"))
+            .unwrap()
+            .contains(&lock)
+    );
+    assert!(
+        fs::read_to_string(bundle.join("manifest.json"))
+            .unwrap()
+            .contains("\"lto\":\"full\"")
+    );
+    tools.verify_universal(&bundle, "consumer").unwrap();
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "requires pinned LLVM and both macOS Rust targets"]
 fn hello_world_universal_bundle_and_thin_slice_rejection() {
     let tmp = TempDir::new("hello-universal");
     let bundle = build(
