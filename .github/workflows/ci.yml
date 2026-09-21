@@ -81,7 +81,7 @@ jobs:
           mkdir -p target/universal
           "$llvm_bin/llvm-lipo" -create target/aarch64-apple-darwin/release/zebc target/x86_64-apple-darwin/release/zebc -output target/universal/zebc
           "$llvm_bin/llvm-lipo" target/universal/zebc -verify_arch arm64 x86_64
-          target/universal/zebc build examples/scalar.t --model ownership --emit shared --opt O2 --out-dir "$RUNNER_TEMP/universal compiler smoke"
+          ZEB_RUSTC="$(rustup which --toolchain 1.98.1 rustc)" target/universal/zebc build examples/scalar.t --model ownership --emit shared --opt O2 --out-dir "$RUNNER_TEMP/universal compiler smoke"
           test "$("$RUNNER_TEMP/universal compiler smoke/consumer" 20)" = 41
       - name: Run native tests on the host architecture
         run: cargo test -p zebc --locked -- --ignored --test-threads=1
