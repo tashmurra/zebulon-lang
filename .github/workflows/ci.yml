@@ -23,8 +23,8 @@ jobs:
             artifact: zebc-windows-x86_64
             binary: target/release/zebc.exe
           - os: macos-15
-            artifact: zebc-macos-arm64
-            binary: target/release/zebc
+            artifact: zebc-macos-universal
+            binary: target/universal/zebc
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     steps:
@@ -70,6 +70,19 @@ jobs:
         run: python -X utf8 tools/check_repository.py
       - name: Build release compiler and runtime
         run: cargo build --workspace --release --locked
+      - name: Build and verify universal macOS compiler
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '14.0'
+        run: |
+          cargo build -p zebc --release --locked --target aarch64-apple-darwin --target x86_64-apple-darwin
+          llvm_bin="$("$ZEB_LLVM_CONFIG" --bindir)"
+          mkdir -p target/universal
+          "$llvm_bin/llvm-lipo" -create target/aarch64-apple-darwin/release/zebc target/x86_64-apple-darwin/release/zebc -output target/universal/zebc
+          "$llvm_bin/llvm-lipo" target/universal/zebc -verify_arch arm64 x86_64
+          target/universal/zebc build examples/scalar.t --model ownership --emit shared --opt O2 --out-dir "$RUNNER_TEMP/universal compiler smoke"
+          test "$("$RUNNER_TEMP/universal compiler smoke/consumer" 20)" = 41
       - name: Run native tests on the host architecture
         run: cargo test -p zebc --locked -- --ignored --test-threads=1
       - name: Upload compiler
