@@ -15,12 +15,12 @@ use zeb_frontend::{
 };
 
 const HELP: &str = "zebc — Zebulon compiler\n\
-Usage:\n  zebc capabilities --format json\n  zebc inspect FILE --stage tokens|preprocessed|ast|ir|llvm|object-init-llvm|object-llvm [--encoding auto|utf-8|ascii|latin-1|utf-16le|utf-16be]\n  zebc check FILE\n  zebc build FILE --out-dir NEW_DIRECTORY [--opt O0|O2] [--emit obj|exe|static|shared] [--lto none|full] [--runtime-cache DIR]\n\
+Usage:\n  zebc --version\n  zebc capabilities --format json\n  zebc inspect FILE --stage tokens|preprocessed|ast|ir|llvm|object-init-llvm|object-llvm [--encoding auto|utf-8|ascii|latin-1|utf-16le|utf-16be]\n  zebc check FILE\n  zebc build FILE --out-dir NEW_DIRECTORY [--opt O0|O2] [--emit obj|exe|static|shared] [--lto none|full] [--runtime-cache DIR]\n\
 Optional: --include-dir DIR (repeatable); --max-source-bytes N (default 16777216)\n\
   --model ownership|lifetimes selects the memory model (default lifetimes); it applies to inspect, check and build\n\
 check validates supported scalar/object source; build emits host-native bundles (universal on macOS; x86-64 on Linux/Windows).\n";
 
-const CAPABILITIES_TEMPLATE: &str = r#"{"schema":1,"compiler":"zebc","profile":"scalar-flow-v1","source_encodings":["utf-8","ascii","latin-1","utf-16le","utf-16be"],"token_inspection":true,"ast_inspection":true,"named_object_initialization_llvm":true,"scalar_ir_inspection":true,"llvm_inspection":true,"preliminary_semantic_checks":true,"semantic_check":true,"native_compilation":true,"native_profile":"scalar-executable-v1","shared_profile":"scalar-shared-v1","integer_argument_profiles":["scalar-shared-i32-v2","scalar-object-i32-v2","scalar-static-i32-v2"],"object_profile":"scalar-object-v1","static_profile":"scalar-static-v1","lto_modes":{"default":"none","full":"shared-O2-only"},"memory_models":["lifetimes","ownership"],"default_memory_model":"lifetimes","object_shared_profile":"{object_profile}","game_execution":true,"qualified_targets":[]}"#;
+const CAPABILITIES_TEMPLATE: &str = r#"{"schema":1,"compiler":"zebc","compiler_version":"{compiler_version}","profile":"scalar-flow-v1","source_encodings":["utf-8","ascii","latin-1","utf-16le","utf-16be"],"token_inspection":true,"ast_inspection":true,"named_object_initialization_llvm":true,"scalar_ir_inspection":true,"llvm_inspection":true,"preliminary_semantic_checks":true,"semantic_check":true,"native_compilation":true,"native_profile":"scalar-executable-v1","shared_profile":"scalar-shared-v1","integer_argument_profiles":["scalar-shared-i32-v2","scalar-object-i32-v2","scalar-static-i32-v2"],"object_profile":"scalar-object-v1","static_profile":"scalar-static-v1","lto_modes":{"default":"none","full":"shared-O2-only"},"memory_models":["lifetimes","ownership"],"default_memory_model":"lifetimes","object_shared_profile":"{object_profile}","game_execution":true,"qualified_targets":[]}"#;
 
 fn capabilities() -> String {
     let host = llvm::Target::host();
@@ -35,6 +35,7 @@ fn capabilities() -> String {
         })
         .unwrap_or_default();
     CAPABILITIES_TEMPLATE
+        .replace("{compiler_version}", env!("CARGO_PKG_VERSION"))
         .replace("{object_profile}", object_build::PROFILE)
         .replace(
             "\"native_compilation\":true",
@@ -65,6 +66,9 @@ fn run(args: Vec<OsString>) -> Result<(), (u8, String)> {
     let io_error = |error: io::Error| (1, format!("zebc: output-io: {error}"));
     if matches!(command, "--help" | "-h") && args.len() == 1 {
         return write!(output, "{HELP}").map_err(io_error);
+    }
+    if command == "--version" && args.len() == 1 {
+        return writeln!(output, "zebc {}", env!("CARGO_PKG_VERSION")).map_err(io_error);
     }
     if command == "capabilities" {
         if args.len() != 3 || args[1] != "--format" || args[2] != "json" {
