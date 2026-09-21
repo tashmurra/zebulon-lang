@@ -27,9 +27,9 @@ fn entry_wrapper(entry: usize, symbol: &str, target: Target, arity: usize) -> St
         .map(|i| format!("i64 %packed{i}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let cpu = target.cpu();
+    let target_attributes = target.function_attributes();
     format!(
-        "\ndefine i64 @{symbol}(i32 %abi{parameters}) \"target-cpu\"=\"{cpu}\" {{\n  %matches = icmp eq i32 %abi, {version}\n  br i1 %matches, label %invoke, label %mismatch\nmismatch:\n  ret i64 7\ninvoke:\n{packing}  %r = call %out @zfn{entry}({arguments})\n  %value = extractvalue %out %r, 0\n  %error = extractvalue %out %r, 1\n  %site = extractvalue %out %r, 2\n  %failed = icmp ne i32 %error, 0\n  %kind = add i32 %error, 2\n  %tag = zext i32 %kind to i64\n  %payload = shl i64 %site, 32\n  %failure = or i64 %payload, %tag\n  %word = select i1 %failed, i64 %failure, i64 %value\n  ret i64 %word\n}}\n"
+        "\ndefine i64 @{symbol}(i32 %abi{parameters}) {target_attributes} {{\n  %matches = icmp eq i32 %abi, {version}\n  br i1 %matches, label %invoke, label %mismatch\nmismatch:\n  ret i64 7\ninvoke:\n{packing}  %r = call %out @zfn{entry}({arguments})\n  %value = extractvalue %out %r, 0\n  %error = extractvalue %out %r, 1\n  %site = extractvalue %out %r, 2\n  %failed = icmp ne i32 %error, 0\n  %kind = add i32 %error, 2\n  %tag = zext i32 %kind to i64\n  %payload = shl i64 %site, 32\n  %failure = or i64 %payload, %tag\n  %word = select i1 %failed, i64 %failure, i64 %value\n  ret i64 %word\n}}\n"
     )
 }
 fn consumer(symbol: &str, arity: usize) -> String {

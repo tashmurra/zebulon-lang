@@ -88,7 +88,7 @@ pub enum Program {
     },
 }
 
-fn entry(symbol: &str, program: &Program, cpu: &str, abi: u32) -> String {
+fn entry(symbol: &str, program: &Program, target_attributes: &str, abi: u32) -> String {
     // the memory model is a build option, so the entry selects it
     // before anything allocates. Under ownership the runtime keeps its default.
     let select_model = match program {
@@ -179,7 +179,7 @@ fn entry(symbol: &str, program: &Program, cpu: &str, abi: u32) -> String {
     };
     format!(
         r#"
-define i64 @{symbol}(i32 %abi, i64 %slot, i64 %objects, i64 %properties, i64 %output_limit) "target-cpu"="{cpu}" {{
+define i64 @{symbol}(i32 %abi, i64 %slot, i64 %objects, i64 %properties, i64 %output_limit) {target_attributes} {{
 entry:
   %version = icmp eq i32 %abi, {abi}
   br i1 %version, label %open, label %mismatch
@@ -270,91 +270,91 @@ success:
   %final_result = select i1 %owned_text, i64 9, i64 %result
   ret i64 %final_result
 }}
-define i32 @{symbol}_output_byte(i64 %slot, i64 %offset) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_output_byte(i64 %slot, i64 %offset) {target_attributes} {{
   %byte = call i32 @zeb_host_output_byte(i64 %slot, i64 %offset)
   ret i32 %byte
 }}
-define i64 @{symbol}_output_len(i64 %slot) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_output_len(i64 %slot) {target_attributes} {{
   %len = call i64 @zeb_host_output_len(i64 %slot)
   ret i64 %len
 }}
-define i64 @{symbol}_output_word(i64 %slot, i64 %offset) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_output_word(i64 %slot, i64 %offset) {target_attributes} {{
   %word = call i64 @zeb_host_output_word(i64 %slot, i64 %offset)
   ret i64 %word
 }}
-define i64 @{symbol}_event_len(i64 %slot) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_event_len(i64 %slot) {target_attributes} {{
   %len = call i64 @zeb_host_event_len(i64 %slot)
   ret i64 %len
 }}
-define i64 @{symbol}_event_word(i64 %slot, i64 %offset) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_event_word(i64 %slot, i64 %offset) {target_attributes} {{
   %word = call i64 @zeb_host_event_word(i64 %slot, i64 %offset)
   ret i64 %word
 }}
-define i32 @{symbol}_text_byte(i32 %literal, i64 %offset) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_text_byte(i32 %literal, i64 %offset) {target_attributes} {{
   %byte = call i32 @zeb_objects_text_byte(i32 %literal, i64 %offset)
   ret i32 %byte
 }}
-define i32 @{symbol}_poll(i64 %slot) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_poll(i64 %slot) {target_attributes} {{
   %code = call i32 @zeb_host_poll(i64 %slot)
   ret i32 %code
 }}
-define i32 @{symbol}_drained(i64 %slot) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_drained(i64 %slot) {target_attributes} {{
   %code = call i32 @zeb_host_drained(i64 %slot)
   ret i32 %code
 }}
-define i32 @{symbol}_reply_byte(i64 %slot, i32 %byte) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_reply_byte(i64 %slot, i32 %byte) {target_attributes} {{
   %code = call i32 @zeb_host_reply_byte(i64 %slot, i32 %byte)
   ret i32 %code
 }}
-define i32 @{symbol}_reply_action(i64 %slot, i32 %verb) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_reply_action(i64 %slot, i32 %verb) {target_attributes} {{
   %code = call i32 @zeb_host_reply_action(i64 %slot, i32 %verb)
   ret i32 %code
 }}
-define i32 @{symbol}_reply_value(i64 %slot, i32 %tag, i64 %payload) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_reply_value(i64 %slot, i32 %tag, i64 %payload) {target_attributes} {{
   %code = call i32 @zeb_host_reply_value(i64 %slot, i32 %tag, i64 %payload)
   ret i32 %code
 }}
-define i32 @{symbol}_reply_subject(i64 %slot, i64 %handle) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_reply_subject(i64 %slot, i64 %handle) {target_attributes} {{
   %code = call i32 @zeb_host_reply_subject(i64 %slot, i64 %handle)
   ret i32 %code
 }}
-define i32 @{symbol}_resume(i64 %slot) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_resume(i64 %slot) {target_attributes} {{
   %code = call i32 @zeb_host_resume(i64 %slot)
   ret i32 %code
 }}
-define i32 @{symbol}_close(i64 %slot) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_close(i64 %slot) {target_attributes} {{
   %code = call i32 @zeb_host_close(i64 %slot)
   ret i32 %code
 }}
-define i32 @{symbol}_reset(i64 %slot) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_reset(i64 %slot) {target_attributes} {{
   %code = call i32 @zeb_host_reset(i64 %slot)
   ret i32 %code
 }}
-define i32 @{symbol}_discard(i64 %slot) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_discard(i64 %slot) {target_attributes} {{
   %code = call i32 @zeb_host_discard(i64 %slot)
   ret i32 %code
 }}
-define i32 @{symbol}_finish(i64 %slot, i64 %outcome) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_finish(i64 %slot, i64 %outcome) {target_attributes} {{
   %code = call i32 @zeb_host_finish(i64 %slot, i64 %outcome)
   ret i32 %code
 }}
-define i64 @{symbol}_outcome(i64 %slot) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_outcome(i64 %slot) {target_attributes} {{
   %value = call i64 @zeb_host_outcome(i64 %slot)
   ret i64 %value
 }}
-define i64 @{symbol}_persistence(i64 %slot, i32 %op, i64 %value) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_persistence(i64 %slot, i32 %op, i64 %value) {target_attributes} {{
   %result = call i64 @zeb_host_persistence(i64 %slot, i32 %op, i64 %value)
   ret i64 %result
 }}
-define i32 @{symbol}_inspect(i64 %slot, i32 %kind, i64 %a, i64 %b) "target-cpu"="{cpu}" {{
+define i32 @{symbol}_inspect(i64 %slot, i32 %kind, i64 %a, i64 %b) {target_attributes} {{
   %code = call i32 @zeb_host_inspect(i64 %slot, i32 %kind, i64 %a, i64 %b)
   ret i32 %code
 }}
-define i64 @{symbol}_result_len(i64 %slot) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_result_len(i64 %slot) {target_attributes} {{
   %len = call i64 @zeb_host_result_len(i64 %slot)
   ret i64 %len
 }}
-define i64 @{symbol}_result(i64 %slot, i64 %index) "target-cpu"="{cpu}" {{
+define i64 @{symbol}_result(i64 %slot, i64 %index) {target_attributes} {{
   %value = call i64 @zeb_host_result(i64 %slot, i64 %index)
   ret i64 %value
 }}
@@ -940,7 +940,7 @@ pub fn build(
             let readable = tools.symbols(&dir, &runtime, true)?;
             module += "\ndeclare i32 @zeb_objects_text_byte(i32, i64)\ndeclare i32 @zeb_objects_output_byte(i64)\ndeclare i32 @zeb_host_reset(i64)\ndeclare i32 @zeb_host_discard(i64)\ndeclare i32 @zeb_host_poll(i64)\ndeclare i32 @zeb_host_output_byte(i64, i64)\ndeclare i64 @zeb_host_output_len(i64)\ndeclare i64 @zeb_host_output_word(i64, i64)\ndeclare i64 @zeb_host_event_len(i64)\ndeclare i64 @zeb_host_event_word(i64, i64)\ndeclare i32 @zeb_host_drained(i64)\ndeclare i32 @zeb_host_reply_byte(i64, i32)\ndeclare i32 @zeb_host_reply_action(i64, i32)\ndeclare i32 @zeb_host_reply_value(i64, i32, i64)\ndeclare i32 @zeb_host_reply_subject(i64, i64)\ndeclare i32 @zeb_host_resume(i64)\ndeclare i32 @zeb_host_close(i64)\ndeclare i32 @zeb_host_finish(i64, i64)\ndeclare i64 @zeb_host_outcome(i64)\ndeclare i32 @zeb_host_inspect(i64, i32, i64, i64)\ndeclare i64 @zeb_host_result_len(i64)\ndeclare i64 @zeb_host_result(i64, i64)\n";
             module += "\ndeclare i64 @zeb_host_persistence(i64, i32, i64)\n";
-            let mut boundary = entry(&exported, &program, target.cpu(), ABI);
+            let mut boundary = entry(&exported, &program, target.function_attributes(), ABI);
             let mut schema_calls = String::new();
             for (i, chunk) in identity.as_bytes().as_chunks::<16>().0.iter().enumerate() {
                 let hex = std::str::from_utf8(chunk).map_err(|e| e.to_string())?;

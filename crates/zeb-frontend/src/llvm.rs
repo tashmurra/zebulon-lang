@@ -107,6 +107,16 @@ impl Target {
             Self::MacArm64 => "generic",
         }
     }
+    /// Match the pinned Rust target baseline so LTO may inline runtime code.
+    pub fn function_attributes(self) -> &'static str {
+        match self {
+            Self::WindowsX86_64 => {
+                r#""target-cpu"="x86-64" "target-features"="+cx16,+sse,+sse2,+sse3,+sahf""#
+            }
+            Self::MacX86_64 | Self::LinuxX86_64 => r#""target-cpu"="x86-64""#,
+            Self::MacArm64 => r#""target-cpu"="generic""#,
+        }
+    }
     pub fn clang_cpu(self) -> &'static str {
         match self {
             Self::MacX86_64 | Self::LinuxX86_64 | Self::WindowsX86_64 => "-march=x86-64",
@@ -2928,7 +2938,7 @@ pub fn emit_stack_entry_with_runtime_candidate(
     }
     let charge = charges[root].general;
     let root_failure = ((function.start as u64) << 32) | 8;
-    write!(module, "\ndefine i64 @{symbol}(i32 %abi, i64 %budget{parameters_text}) noredzone \"target-cpu\"=\"{}\" {{\nentry:\n  %version = icmp eq i32 %abi, 3\n  br i1 %version, label %admit, label %mismatch\nmismatch:\n  ret i64 7\nadmit:\n  %small = icmp ult i64 %budget, {charge}\n  br i1 %small, label %exhausted, label %invoke\nexhausted:\n  ret i64 {root_failure}\ninvoke:\n  %remaining = sub i64 %budget, {charge}\n{packing}  %result = call %out @zfn{root}({arguments})\n  %value = extractvalue %out %result, 0\n  %code = extractvalue %out %result, 1\n  %site = extractvalue %out %result, 2\n  %failed = icmp ne i32 %code, 0\n  %kind = add i32 %code, 2\n  %tag = zext i32 %kind to i64\n  %offset = shl i64 %site, 32\n  %error = or i64 %offset, %tag\n  %word = select i1 %failed, i64 %error, i64 %value\n  ret i64 %word\n}}\n", target.cpu()).map_err(|_| Diagnostic::resource(0))?;
+    write!(module, "\ndefine i64 @{symbol}(i32 %abi, i64 %budget{parameters_text}) noredzone {} {{\nentry:\n  %version = icmp eq i32 %abi, 3\n  br i1 %version, label %admit, label %mismatch\nmismatch:\n  ret i64 7\nadmit:\n  %small = icmp ult i64 %budget, {charge}\n  br i1 %small, label %exhausted, label %invoke\nexhausted:\n  ret i64 {root_failure}\ninvoke:\n  %remaining = sub i64 %budget, {charge}\n{packing}  %result = call %out @zfn{root}({arguments})\n  %value = extractvalue %out %result, 0\n  %code = extractvalue %out %result, 1\n  %site = extractvalue %out %result, 2\n  %failed = icmp ne i32 %code, 0\n  %kind = add i32 %code, 2\n  %tag = zext i32 %kind to i64\n  %offset = shl i64 %site, 32\n  %error = or i64 %offset, %tag\n  %word = select i1 %failed, i64 %error, i64 %value\n  ret i64 %word\n}}\n", target.function_attributes()).map_err(|_| Diagnostic::resource(0))?;
     Ok(module.0)
 }
 
@@ -3171,8 +3181,8 @@ fn emit_module(
                     .map_err(|_| Diagnostic::resource(0))?;
             }
             e.line(format_args!(
-                ") \"target-cpu\"=\"{}\"{}{} {{\nentry:",
-                target.cpu(),
+                ") {}{}{} {{\nentry:",
+                target.function_attributes(),
                 if charges.is_some() { " noredzone" } else { "" },
                 attributes.unwrap_or("")
             ))?;

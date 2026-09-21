@@ -68,9 +68,9 @@ pub fn build(
             let target = host.slices()[index];
             let arch = target.arch();
             // Conventional process entry only; game functions retain their internal outcome ABI.
-            let cpu = target.cpu();
+            let target_attributes = target.function_attributes();
             module += &format!(
-                "\ndefine i32 @main() \"target-cpu\"=\"{cpu}\" {{\n  %r = call %out @zfn{entry}()\n  %v = extractvalue %out %r, 0\n  %err = extractvalue %out %r, 1\n  %failed = icmp ne i32 %err, 0\n  %bits = lshr i64 %v, 32\n  %int = trunc i64 %bits to i32\n  %tag = trunc i64 %v to i32\n  %isint = icmp eq i32 %tag, 2\n  %value = select i1 %isint, i32 %int, i32 %tag\n  %exit = select i1 %failed, i32 70, i32 %value\n  ret i32 %exit\n}}\n"
+                "\ndefine i32 @main() {target_attributes} {{\n  %r = call %out @zfn{entry}()\n  %v = extractvalue %out %r, 0\n  %err = extractvalue %out %r, 1\n  %failed = icmp ne i32 %err, 0\n  %bits = lshr i64 %v, 32\n  %int = trunc i64 %bits to i32\n  %tag = trunc i64 %v to i32\n  %isint = icmp eq i32 %tag, 2\n  %value = select i1 %isint, i32 %int, i32 %tag\n  %exit = select i1 %failed, i32 70, i32 %value\n  ret i32 %exit\n}}\n"
             );
             let file = format!("{arch}.ll");
             let exe = format!("{arch}.exe");
