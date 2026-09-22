@@ -336,7 +336,7 @@ fn guarded_runtime_preserves_mutual_recursion_and_source_errors_through_lto() {
             }
             let bc = format!("{stem}.bc");
             let optimized_ll = format!("{stem}.ll");
-            let linker = format!("-fuse-ld={bin}/ld64.lld");
+            let linker = format!("-fuse-ld={}", tools.tool("ld64.lld"));
             let mut a = common.to_vec();
             a.extend([
                 "-flto=full",

@@ -14,14 +14,18 @@ pub const TARGETS: [&str; 2] = ["x86_64-apple-darwin", "aarch64-apple-darwin"];
 #[derive(Clone, Debug, Default)]
 pub struct Options {
     pub llvm_config: Option<String>,
+    pub ld64_lld: Option<String>,
     pub rustc: Option<String>,
     pub sdk: Option<String>,
 }
 impl Options {
     pub fn from_env() -> Result<Self, String> {
-        fn first(names: &[&str]) -> Result<Option<String>, String> {
+        Self::from_lookup(|name| env::var_os(name))
+    }
+    fn from_lookup(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<Self, String> {
+        let first = |names: &[&str]| -> Result<Option<String>, String> {
             for name in names {
-                if let Some(value) = env::var_os(name) {
+                if let Some(value) = lookup(name) {
                     let value = value
                         .into_string()
                         .map_err(|_| format!("{name} must be valid UTF-8"))?;
@@ -32,9 +36,10 @@ impl Options {
                 }
             }
             Ok(None)
-        }
+        };
         Ok(Self {
             llvm_config: first(&["ZEB_LLVM_CONFIG", "LLVM_CONFIG"])?,
+            ld64_lld: first(&["ZEB_LD64_LLD", "ZEB_LLD"])?,
             rustc: first(&["ZEB_RUSTC", "RUSTC"])?,
             sdk: first(&["SDKROOT"])?,
         })
@@ -45,6 +50,7 @@ impl Options {
 pub struct Toolchain {
     pub host: Target,
     pub bin: String,
+    pub ld64_lld: String,
     pub sdk: String,
     pub rustc: String,
     pub lipo: String,
@@ -136,6 +142,33 @@ fn check_version(label: &str, actual: &str, expected: &str) -> Result<(), String
         ))
     }
 }
+// LLD can be packaged separately from LLVM (for example, Homebrew's lld keg).
+// An explicit selection, or an existing bundled linker, must validate; never
+// silently replace an invalid selection with a different tool on PATH.
+fn resolve_ld64_lld(
+    dir: &Path,
+    bin: &Path,
+    selected: Option<&str>,
+    search: Option<&std::ffi::OsStr>,
+    inputs: &mut Vec<PathBuf>,
+) -> Result<String, String> {
+    let bundled = bin.join("ld64.lld");
+    let linker = if let Some(selected) = selected {
+        find_program(selected, dir, search)?
+    } else if bundled.try_exists().map_err(|e| e.to_string())? {
+        find_program(&text(&bundled)?, dir, search)?
+    } else {
+        find_program("ld64.lld", dir, search)
+            .map_err(|e| format!("{e}; set ZEB_LD64_LLD to the matching LLD executable"))?
+    };
+    check_version(
+        "ld64.lld",
+        &output(dir, &linker, &["--version"])?,
+        LLVM_VERSION,
+    )?;
+    inputs.push(PathBuf::from(&linker));
+    Ok(linker)
+}
 #[cfg(test)]
 fn host_target(os: &str, arch: &str) -> Result<&'static str, String> {
     Target::for_host(os, arch).map(Target::rust_triple)
@@ -220,7 +253,7 @@ impl Toolchain {
             "llvm-readobj",
         ];
         required.extend(if host.is_macos() {
-            vec!["llvm-lipo", "ld64.lld"]
+            vec!["llvm-lipo"]
         } else if host.is_windows() {
             vec!["lld-link"]
         } else {
@@ -241,6 +274,17 @@ impl Toolchain {
             )?;
             inputs.push(full);
         }
+        let ld64_lld = if host.is_macos() {
+            resolve_ld64_lld(
+                &caller_dir,
+                Path::new(&bin),
+                options.ld64_lld.as_deref(),
+                path.as_deref(),
+                &mut inputs,
+            )?
+        } else {
+            String::new()
+        };
         if host.is_windows() {
             inputs.extend(directory_files(Path::new(&bin), &[".dll"])?);
         }
@@ -382,6 +426,7 @@ impl Toolchain {
         Ok(Self {
             host,
             bin,
+            ld64_lld,
             sdk,
             rustc,
             lipo,
@@ -399,6 +444,123 @@ impl Toolchain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lld_environment_alias_has_explicit_precedence() {
+        let options = |primary: Option<&str>, alias: Option<&str>| {
+            Options::from_lookup(|name| match name {
+                "ZEB_LD64_LLD" => primary.map(Into::into),
+                "ZEB_LLD" => alias.map(Into::into),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            options(None, Some("separate/ld64.lld"))
+                .unwrap()
+                .ld64_lld
+                .as_deref(),
+            Some("separate/ld64.lld")
+        );
+        assert_eq!(
+            options(Some("primary/ld64.lld"), Some("alias/ld64.lld"))
+                .unwrap()
+                .ld64_lld
+                .as_deref(),
+            Some("primary/ld64.lld")
+        );
+        assert_eq!(
+            options(Some("primary/ld64.lld"), Some(""))
+                .unwrap()
+                .ld64_lld
+                .as_deref(),
+            Some("primary/ld64.lld")
+        );
+        assert!(options(None, None).unwrap().ld64_lld.is_none());
+        assert_eq!(
+            options(Some(""), Some("alias/ld64.lld")).unwrap_err(),
+            "ZEB_LD64_LLD is set but empty"
+        );
+        assert_eq!(
+            options(None, Some("")).unwrap_err(),
+            "ZEB_LLD is set but empty"
+        );
+    }
+    #[test]
+    #[cfg(unix)]
+    fn separate_lld_selection_validation_and_fingerprints() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = env::temp_dir().join(format!("zeb separate lld {}", std::process::id()));
+        let bin = dir.join("llvm bin");
+        let lld_bin = dir.join("lld bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&lld_bin).unwrap();
+        let bundled = bin.join("ld64.lld");
+        let separate = lld_bin.join("ld64.lld");
+        let script = |path: &Path, version: &str| {
+            fs::write(path, format!("#!/bin/sh\nprintf 'LLD {version}\\n'\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        script(&separate, LLVM_VERSION);
+        let options = Options::from_lookup(|name| {
+            (name == "ZEB_LLD").then(|| separate.as_os_str().to_owned())
+        })
+        .unwrap();
+        // The configured alias must work with neither a bundled linker nor PATH.
+        let mut alias_inputs = Vec::new();
+        assert_eq!(
+            resolve_ld64_lld(
+                &dir,
+                &bin,
+                options.ld64_lld.as_deref(),
+                None,
+                &mut alias_inputs
+            )
+            .unwrap(),
+            text(&separate).unwrap()
+        );
+        assert_eq!(alias_inputs, std::slice::from_ref(&separate));
+        let search = env::join_paths([&lld_bin]).unwrap();
+        let mut inputs = Vec::new();
+        let found = resolve_ld64_lld(&dir, &bin, None, Some(&search), &mut inputs).unwrap();
+        assert_eq!(found, text(&separate).unwrap());
+        assert_eq!(inputs, std::slice::from_ref(&separate));
+        let before = fingerprints(&dir, &inputs).unwrap().render();
+        script(&separate, "22.1.8 (rebuilt)");
+        assert_ne!(before, fingerprints(&dir, &inputs).unwrap().render());
+
+        // A bundled tool wins over PATH, but the explicit override wins over both.
+        script(&bundled, LLVM_VERSION);
+        assert_eq!(
+            resolve_ld64_lld(&dir, &bin, None, Some(&search), &mut inputs).unwrap(),
+            text(&bundled).unwrap()
+        );
+        assert_eq!(
+            resolve_ld64_lld(&dir, &bin, Some("lld bin/ld64.lld"), None, &mut inputs).unwrap(),
+            text(&separate).unwrap()
+        );
+        for selected in [Some("missing/ld64.lld"), Some("")] {
+            assert!(resolve_ld64_lld(&dir, &bin, selected, Some(&search), &mut inputs).is_err());
+        }
+        script(&separate, "22.1.80");
+        let error = resolve_ld64_lld(
+            &dir,
+            &bin,
+            Some("lld bin/ld64.lld"),
+            Some(&search),
+            &mut inputs,
+        )
+        .unwrap_err();
+        assert!(error.contains("requires version 22.1.8"), "{error}");
+        script(&bundled, "21.1.8");
+        script(&separate, LLVM_VERSION);
+        assert!(resolve_ld64_lld(&dir, &bin, None, Some(&search), &mut inputs).is_err());
+        fs::remove_file(&bundled).unwrap();
+        script(&separate, "21.1.8");
+        assert!(resolve_ld64_lld(&dir, &bin, None, Some(&search), &mut inputs).is_err());
+        fs::remove_file(&separate).unwrap();
+        let error = resolve_ld64_lld(&dir, &bin, None, Some(&search), &mut inputs).unwrap_err();
+        assert!(error.contains("ZEB_LD64_LLD"), "{error}");
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn exact_versions_only() {
         assert!(check_version("clang", "clang version 22.1.8 (build)", LLVM_VERSION).is_ok());

@@ -15,11 +15,12 @@ The `zebc` compiler, frontend, runtime and generic collection helpers are includ
 
 Each compiler builds for its host OS. macOS output is universal arm64/x86-64 with deployment target 14.0; Linux output uses the x86-64 GNU/Linux ABI; Windows output uses the x86-64 MSVC ABI. Cross-OS builds, Linux/Windows ARM64, musl, MinGW and iOS are not supported. Build success alone does not establish execution on another architecture or compatibility with older operating systems.
 
-LLVM may be installed anywhere. Put the required `llvm-config` on `PATH`, or set `ZEB_LLVM_CONFIG` to its executable. The compiler obtains all LLVM tools from that installation. There is no dependency on a particular package manager.
+LLVM may be installed anywhere. Put the required `llvm-config` on `PATH`, or set `ZEB_LLVM_CONFIG` to its executable. The compiler obtains LLVM tools from that installation; macOS LLD may be installed separately. There is no dependency on a particular package manager.
 
 | Setting | Selection |
 | --- | --- |
 | LLVM | `ZEB_LLVM_CONFIG`, otherwise `LLVM_CONFIG`, otherwise `llvm-config` on `PATH` |
+| macOS LLD | `ZEB_LD64_LLD`, otherwise `ZEB_LLD` (compatibility alias), otherwise `ld64.lld` in LLVM's bin directory, otherwise `ld64.lld` on `PATH` |
 | Rust | `ZEB_RUSTC`, otherwise `RUSTC`, otherwise `rustc` on `PATH` |
 | macOS SDK | `SDKROOT`, otherwise `xcrun --sdk macosx --show-sdk-path` |
 | Apple tools | `DEVELOPER_DIR` when set, otherwise the developer tools selected by the system |

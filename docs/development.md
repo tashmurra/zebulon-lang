@@ -20,6 +20,26 @@ CI caches only the extracted installation, with archive provenance recorded insi
 
 Do not replace version validation with a bypass to make a test pass. New compiler versions need their own native/LTO checks. SDK selection follows `SDKROOT` or the active Apple developer tools; paths containing spaces are supported.
 
+### Separate LLVM and LLD installations on macOS
+
+The macOS linker is selected from `ZEB_LD64_LLD` (an executable path or name), then the compatibility alias `ZEB_LLD`, then `ld64.lld` in `llvm-config --bindir`, then `ld64.lld` on `PATH` if the bundled linker is absent. If both variables are set, `ZEB_LD64_LLD` wins. An empty, missing, or wrong-version selection is an error; it does not fall back to the alias or automatic discovery. An invalid bundled linker is also an error. The selected linker must report LLVM's pinned version, 22.1.8, and its path and contents are included in `native-tool-lock.json` and build/cache identities. Full LTO uses this resolved executable.
+
+Homebrew packages LLVM and LLD in separate kegs. With `llvm@22` and `lld@22` both at 22.1.8, configure them without copying or linking files into either keg:
+
+```sh
+export ZEB_LLVM_CONFIG="$(brew --prefix llvm@22)/bin/llvm-config"
+export ZEB_LD64_LLD="$(brew --prefix lld@22)/bin/ld64.lld"
+rustup target add x86_64-apple-darwin aarch64-apple-darwin
+mkdir -p build
+zebc build hello.t --emit shared --out-dir build/hello
+./build/hello/consumer
+lipo -archs build/hello/consumer
+```
+
+Existing Makefiles that export `ZEB_LLD="$(brew --prefix lld@22)/bin/ld64.lld"` work without adding the LLD keg to `PATH`, provided `ZEB_LD64_LLD` is unset. Both variables select the executable, not its containing directory.
+
+Alternatively, put the matching LLD bin directory on `PATH`. The formula names alone do not guarantee the pinned patch version; the compiler validates the installed tools. The output directory must be new. Universal output is verified with separate `lipo -verify_arch` calls for `x86_64` and `arm64`, accommodating Apple lipo variants that interpret a second architecture as another input file. Both slices must pass verification before the bundle is marked complete.
+
 ## Tests
 
 Use the commands in the README. `cargo test --workspace --locked` runs the ordinary suite. Frontend integration tests are grouped by syntax, semantics, values, world features and lowering. Runtime tests cover storage, identity, cleanup, grammar, history, save data and sessions. Compiler tests cover CLI diagnostics, manifests, data tables, tool resolution, caches and generated-code constraints.

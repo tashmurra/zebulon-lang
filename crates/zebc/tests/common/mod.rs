@@ -44,6 +44,58 @@ pub fn tools(dir: &Path) -> &'static Toolchain {
     tools.record(dir).unwrap();
     tools
 }
+
+/// A split installation using the admitted tools, with no linker in LLVM's bin.
+#[cfg(target_os = "macos")]
+pub fn split_llvm_lld(dir: &Path, tools: &Toolchain) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let bin = dir.join("llvm bin");
+    let lld_bin = dir.join("lld bin");
+    fs::create_dir(&bin).unwrap();
+    fs::create_dir(&lld_bin).unwrap();
+    for name in [
+        "opt",
+        "clang",
+        "llvm-ar",
+        "llvm-nm",
+        "llvm-dis",
+        "llvm-objdump",
+        "llvm-readobj",
+        "llvm-lipo",
+    ] {
+        symlink(tools.tool(name), bin.join(name)).unwrap();
+    }
+    let original_config = zebc::toolchain::Options::from_env()
+        .unwrap()
+        .llvm_config
+        .unwrap_or_else(|| "llvm-config".into());
+    for option in ["version", "libdir"] {
+        let value = zebc::process::read_stdout(
+            &std::env::current_dir().unwrap(),
+            &original_config,
+            &[&format!("--{option}")],
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+        fs::write(bin.join(option), value).unwrap();
+    }
+    let config = bin.join("llvm-config");
+    fs::write(
+        &config,
+        r#"#!/bin/sh
+case "$1" in
+  --bindir) printf '%s\n' "${0%/*}" ;;
+  --version|--libdir) /bin/cat "${0%/*}/${1#--}" ;;
+  *) exit 2 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+    let lld = lld_bin.join("ld64.lld");
+    symlink(tools.tool("ld64.lld"), &lld).unwrap();
+    (config, lld)
+}
 pub fn runs_on_host(arch: &str) -> bool {
     arch == if std::env::consts::ARCH == "aarch64" {
         "arm64"

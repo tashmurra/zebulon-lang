@@ -116,12 +116,7 @@ pub fn build(
                 &["-create", "x86_64.exe", "arm64.exe", "-output", &program],
                 timeout,
             )?;
-            run(
-                &out,
-                &tools.lipo,
-                &[&program, "-verify_arch", "x86_64", "arm64"],
-                timeout,
-            )?;
+            tools.verify_universal(&out, &program)?;
         } else {
             fs::copy(out.join("x86_64.exe"), out.join(&program)).map_err(|e| e.to_string())?;
         }

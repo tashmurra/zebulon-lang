@@ -5,6 +5,9 @@ use zeb_frontend::llvm::Target;
 
 impl Toolchain {
     pub fn tool(&self, name: &str) -> String {
+        if self.host.is_macos() && name == "ld64.lld" {
+            return self.ld64_lld.clone();
+        }
         Path::new(&self.bin)
             .join(self.host.executable(name))
             .to_string_lossy()
@@ -196,12 +199,7 @@ impl Toolchain {
                     ],
                     Duration::from_secs(60),
                 )?;
-                process::run(
-                    out,
-                    &self.lipo,
-                    &[file, "-verify_arch", "x86_64", "arm64"],
-                    Duration::from_secs(30),
-                )?;
+                self.verify_universal(out, file)?;
             } else {
                 fs::copy(out.join(self.host.arch()).join(file), out.join(file))
                     .map_err(|e| e.to_string())?;
@@ -211,6 +209,19 @@ impl Toolchain {
                         .map_err(|e| e.to_string())?;
                 }
             }
+        }
+        Ok(())
+    }
+    pub fn verify_universal(&self, dir: &Path, file: &str) -> Result<(), String> {
+        // Apple lipo variants can parse the second architecture as another
+        // input file. Verify each required slice in its own invocation.
+        for arch in ["x86_64", "arm64"] {
+            process::run(
+                dir,
+                &self.lipo,
+                &[file, "-verify_arch", arch],
+                Duration::from_secs(30),
+            )?;
         }
         Ok(())
     }
@@ -227,4 +238,48 @@ pub fn export_ir(mut module: String, target: Target) -> String {
         }
     }
     module
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn universal_verification_checks_each_slice_and_rejects_either_missing_slice() {
+        let dir = std::env::temp_dir().join(format!("zeb lipo {}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let lipo = dir.join("lipo");
+        // Model Apple lipo's one-input parsing and a thin input's missing slice.
+        fs::write(
+            &lipo,
+            r#"#!/bin/sh
+test "$#" = 3 && test "$2" = -verify_arch || exit 2
+printf '%s\n' "$3" >> calls
+test "$1" = 'fat binary' || test "$1" = "$3"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&lipo, fs::Permissions::from_mode(0o700)).unwrap();
+        let tools = Toolchain {
+            host: Target::host().unwrap(),
+            bin: String::new(),
+            ld64_lld: String::new(),
+            sdk: String::new(),
+            rustc: String::new(),
+            lipo: lipo.to_str().unwrap().into(),
+            otool: String::new(),
+            lock_json: String::new(),
+            profile_json: String::new(),
+        };
+        tools.verify_universal(&dir, "fat binary").unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("calls")).unwrap(),
+            "x86_64\narm64\n"
+        );
+        for thin in ["x86_64", "arm64"] {
+            assert!(tools.verify_universal(&dir, thin).is_err());
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
