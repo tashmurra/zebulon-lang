@@ -272,6 +272,9 @@ pub struct Store {
     next_reservation: u64,
     pending_constructions: usize,
     records: HashMap<u64, Record>,
+    // Sorted live record slots. Stores IDs rather than handles so slot reuse
+    // cannot retain an expired incarnation. Capacity is admitted at creation.
+    record_order: Vec<u64>,
     statics: HashMap<u32, ObjectRef>,
     class_property: Option<PropertyId>,
     roots: Vec<ObjectRef>,
@@ -309,6 +312,7 @@ impl Store {
             next_reservation: 1,
             pending_constructions: 0,
             records: HashMap::new(),
+            record_order: Vec::new(),
             statics: HashMap::new(),
             class_property: None,
             roots: Vec::new(),
@@ -629,6 +633,11 @@ impl Store {
                         .records
                         .remove(&object.logical)
                         .expect("revoked object");
+                    let index = self
+                        .record_order
+                        .binary_search(&object.logical)
+                        .expect("indexed object");
+                    self.record_order.remove(index);
                     self.string_bytes -= record.text.as_ref().map_or(0, String::len)
                         + record.string_buffer.as_ref().map_or(0, String::len);
                     self.properties -= record.properties.len() + record.vector_charge;
@@ -713,6 +722,7 @@ impl Objects<'_> {
         }
         self.store.terminal = true;
         self.store.records = HashMap::new();
+        self.store.record_order = Vec::new();
         self.store.statics = HashMap::new();
         self.store.cleanup = Vec::new();
         self.store.roots = Vec::new();
@@ -1500,6 +1510,10 @@ impl Objects<'_> {
                 .try_reserve(1)
                 .map_err(|_| Error::Allocation)?;
             self.store
+                .record_order
+                .try_reserve(1)
+                .map_err(|_| Error::Allocation)?;
+            self.store
                 .cleanup
                 .try_reserve(count)
                 .map_err(|_| Error::Allocation)
@@ -1519,6 +1533,8 @@ impl Objects<'_> {
             logical,
             incarnation: self.store.next_identity,
         };
+        let index = self.store.record_order.partition_point(|id| *id < logical);
+        self.store.record_order.insert(index, logical);
         self.store.records.insert(
             object.logical,
             Record {
@@ -3553,34 +3569,29 @@ impl Objects<'_> {
     ) -> Result<Option<ObjectRef>, Error> {
         self.ready()?;
         self.store.record(ancestor)?;
-        let mut cursor = if let Some(after) = after {
+        let cursor = if let Some(after) = after {
             self.store.record(after)?;
             after.logical
         } else {
             0
         };
-        loop {
-            let candidate = self
-                .store
-                .records
-                .iter()
-                .filter(|(id, record)| **id > cursor && record.live && want.admits(record.is_class))
-                .map(|(id, _)| *id)
-                .min();
-            let Some(id) = candidate else {
-                return Ok(None);
-            };
+        let mut index = self.store.record_order.partition_point(|id| *id <= cursor);
+        while let Some(&id) = self.store.record_order.get(index) {
+            index += 1;
+            let record = &self.store.records[&id];
+            if !record.live || !want.admits(record.is_class) {
+                continue;
+            }
             // An internal walk names a slot, not a handle from outside, so the
             // reference is built from the record's own incarnation.
             let Some(candidate) = self.store.reference_to(id) else {
-                cursor = id;
                 continue;
             };
-            cursor = id;
             if candidate != ancestor && self.of_kind(candidate, ancestor)? {
                 return Ok(Some(candidate));
             }
         }
+        Ok(None)
     }
 
     pub fn property_defined(
@@ -4575,6 +4586,130 @@ mod tests {
         assert_eq!(
             objects.next_instance(Some(instance), base),
             Err(Error::Expired)
+        );
+    }
+
+    #[test]
+    fn enumeration_orders_reused_slots_and_observes_live_kind_changes() {
+        let mut state = store(10, 20);
+        let mut objects = state.scope().unwrap();
+        let base = objects.create().unwrap();
+        let gap = objects.create().unwrap();
+        let first = objects.create().unwrap();
+        let last = objects.create().unwrap();
+        objects.store.mark_class(base).unwrap();
+        objects.add_prototype(first, base).unwrap();
+        objects.add_prototype(last, base).unwrap();
+        objects.destroy(first).unwrap();
+        objects.destroy(gap).unwrap();
+        let reused = objects.create().unwrap();
+        assert_eq!(reused.logical, gap.logical);
+        assert_ne!(reused, gap);
+        objects.add_prototype(reused, base).unwrap();
+        assert_eq!(objects.next_instance(None, base), Ok(Some(reused)));
+        assert_eq!(objects.next_instance(Some(reused), base), Ok(Some(last)));
+        assert_eq!(
+            objects.next_instance(Some(first), base),
+            Err(Error::Expired)
+        );
+        assert_eq!(objects.next_instance(Some(gap), base), Err(Error::Expired));
+
+        // A later prototype change must affect an already-started walk.
+        let middle = objects.create().unwrap();
+        assert_eq!(middle.logical, first.logical);
+        assert_eq!(objects.next_instance(Some(reused), base), Ok(Some(last)));
+        objects.add_prototype(middle, base).unwrap();
+        assert_eq!(objects.next_instance(Some(reused), base), Ok(Some(middle)));
+        objects.store.mark_class(middle).unwrap();
+        assert_eq!(objects.next_instance(Some(reused), base), Ok(Some(last)));
+        assert_eq!(objects.next_class(None, base), Ok(Some(middle)));
+        assert_eq!(
+            objects.next_derived(Some(reused), base, Derived::Both),
+            Ok(Some(middle))
+        );
+        assert_eq!(objects.next_instance(Some(last), base), Ok(None));
+    }
+
+    #[test]
+    fn enumeration_survives_turn_cleanup_and_sparse_save_restore() {
+        let mut state = store(10, 20);
+        let (base, kept, temporary) = {
+            let mut objects = state.objects();
+            objects.set_lifetime_model(true);
+            let base = objects.create().unwrap();
+            objects.store.mark_class(base).unwrap();
+            // A restored world's slots need not be dense or start near zero.
+            objects.store.next_identity = 1_000_000_000;
+            let kept = objects.create().unwrap();
+            objects.add_prototype(kept, base).unwrap();
+            objects.set_default_lifetime(Lifetime::Turn);
+            let temporary = objects.create().unwrap();
+            objects.add_prototype(temporary, base).unwrap();
+            assert_eq!(objects.next_instance(Some(kept), base), Ok(Some(temporary)));
+            assert_eq!(objects.release_turn_records(), Ok(1));
+            assert_eq!(objects.next_instance(Some(kept), base), Ok(None));
+            assert_eq!(
+                objects.next_instance(Some(temporary), base),
+                Err(Error::Expired)
+            );
+            (base, kept, temporary)
+        };
+        let mut image = crate::save::Writer::new();
+        state.write_world(&mut image).unwrap();
+        let mut reader = crate::save::Reader::new(&image.bytes).unwrap();
+        let mut restored = state.read_world(&mut reader).unwrap();
+        let new_base = restored.saved_reference(base.logical).unwrap();
+        let new_kept = restored.saved_reference(kept.logical).unwrap();
+        assert_ne!(new_kept, kept);
+        assert!(restored.saved_reference(temporary.logical).is_none());
+        let mut objects = restored.objects();
+        assert_eq!(objects.next_instance(None, new_base), Ok(Some(new_kept)));
+        assert_eq!(objects.next_instance(Some(new_kept), new_base), Ok(None));
+        assert_eq!(
+            objects.next_instance(Some(kept), new_base),
+            Err(Error::Expired)
+        );
+        let added = objects.create().unwrap();
+        objects.add_prototype(added, new_base).unwrap();
+        assert_eq!(
+            objects.next_instance(Some(new_kept), new_base),
+            Ok(Some(added))
+        );
+        objects.destroy(new_kept).unwrap();
+        assert_eq!(objects.next_instance(None, new_base), Ok(Some(added)));
+    }
+
+    #[test]
+    fn enumeration_observes_prototype_rollback_and_failed_restore_is_atomic() {
+        let mut state = store(10, 20);
+        let (base, candidate) = {
+            let mut objects = state.objects();
+            objects.set_lifetime_model(true);
+            let base = objects.create().unwrap();
+            objects.store.mark_class(base).unwrap();
+            let candidate = objects.create().unwrap();
+            objects.set_journalling(true);
+            objects.add_prototype(candidate, base).unwrap();
+            assert_eq!(objects.next_instance(None, base), Ok(Some(candidate)));
+            let delta = objects.take_container_journal();
+            assert_eq!(objects.revert_containers(delta), 1);
+            assert_eq!(objects.next_instance(None, base), Ok(None));
+            objects.set_journalling(false);
+            objects.add_prototype(candidate, base).unwrap();
+            (base, candidate)
+        };
+        let mut image = crate::save::Writer::new();
+        state.write_world(&mut image).unwrap();
+        image.bytes.pop();
+        let mut reader = crate::save::Reader::new(&image.bytes).unwrap();
+        assert!(state.read_world(&mut reader).is_err());
+        assert_eq!(
+            state.objects().next_instance(None, base),
+            Ok(Some(candidate))
+        );
+        assert_eq!(
+            state.objects().next_instance(Some(candidate), base),
+            Ok(None)
         );
     }
 
@@ -6556,6 +6691,7 @@ mod tests {
                 assert_eq!(scope.add_prototype(a, c), Err(Error::ResourceLimit));
             }
             assert_eq!(scope.store.live_objects(), 0);
+            assert!(scope.store.record_order.is_empty());
             assert_eq!(scope.get(a, PropertyId(0)), Err(Error::Terminal));
         }
     }
