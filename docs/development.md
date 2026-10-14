@@ -54,6 +54,31 @@ This is a real native test request: a missing tool or target library fails it. N
 
 Add a focused regression at the layer where the defect occurs. Tests of compiler/runtime behavior must use repository-owned fixtures or inline programs, not external games or private downloads. Put shared native helpers in the existing test support module. Keep expected values independent of the emitter/runtime being tested. Do not delete unique assertions simply to reduce test-file count.
 
+### Object enumeration performance
+
+The runtime keeps a sorted vector of live record IDs alongside its object map.
+`firstObj`/`nextObj` seek after the supplied logical slot and visit subsequent
+records once, rather than repeatedly searching the entire hash table for the
+next ID. Class and inheritance filters are evaluated against current records;
+the index caches neither membership nor handles. Enumeration therefore retains
+ascending slot order, current incarnation checks and visibility of prototype
+changes between calls.
+
+Creation reserves index capacity before publishing an object. Destruction removes
+its ID, including recursive cleanup and Turn expiry. Restore reuses the validated,
+sorted ID list from the existing save format, and failed restores leave the old
+store intact. The index requires one `u64` per live record plus vector capacity;
+inserting a reused slot and removing a record can shift O(n) IDs. This trades
+mutation work for cheaper enumeration, so performance comparisons should include
+allocation/cleanup workloads as well as repeated class walks. Sparse logical IDs
+do not require scanning the gaps or allocating storage up to the highest ID.
+
+Measure code changes at the same optimization level first, then compare native
+`--opt O2` builds. Keep benchmark data and native fingerprints under ignored
+`build/`; record the source revision, input world and command sequence, host
+architecture, warmup, sample count and timing boundary. Native command completion
+does not include an application's UI rendering or transport overhead.
+
 ## Clean-checkout checks and CI
 
 The CI workflow runs formatting, workspace tests, Clippy, repository checks, release builds and the native suite on Ubuntu 24.04 x86-64, Windows Server 2025 x86-64, Apple Silicon macOS 15. The bootstrap’s `--config-out PATH` writes JSON containing `llvm_config` for shell-independent configuration. Extracted LLVM installation caches include host OS/architecture and a recipe revision. The macOS runner builds `zebc` for both `aarch64-apple-darwin` and `x86_64-apple-darwin` with deployment target 14.0, combines them with the resolved `llvm-lipo`, verifies both slices and uses the universal compiler to build and execute a sample. It uploads `target/universal/zebc` as `zebc-macos-universal`. Both the compiler and generated macOS output are universal, but CI executes only Apple Silicon; Intel execution is not covered. Linux and Windows upload their host-native x86-64 compilers. Ordinary `cargo build` and `cargo install` still produce a compiler for their selected Rust target.

@@ -333,7 +333,7 @@ impl Store {
         let mut records = HashMap::new();
         records.try_reserve(count).map_err(|_| Error::Allocation)?;
         let (mut properties, mut bytes, mut edges) = (0usize, 0usize, 0usize);
-        for id in ids {
+        for &id in &ids {
             let is_class = r.flag()?;
             let parent = r.word()?;
             let parent = if parent == 0 {
@@ -677,6 +677,9 @@ impl Store {
             .checked_add(1)
             .ok_or(Error::IdentityExhausted)?;
         store.records = records;
+        // The save's validated ID list is already strictly increasing. Rebuild
+        // the runtime index without serializing any new state or old handles.
+        store.record_order = ids;
         store.roots = roots;
         store.statics = statics;
         store.class_property = class_property;

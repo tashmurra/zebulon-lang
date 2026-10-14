@@ -234,6 +234,63 @@ fn link_modes_lto_and_independent_consumers() {
 
 #[test]
 #[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and host native prerequisites"]
+fn object_enumeration_survives_turn_expiry_despawn_and_restore() {
+    let tmp = TempDir::new("object-enumeration");
+    let bundle = build(
+        &tmp.0,
+        "enumeration",
+        include_str!("../../../tests/native/object-enumeration.t"),
+        "shared",
+        "O2",
+        false,
+    );
+    let play = |commands: &str| {
+        let answer = capture(
+            &bundle,
+            bundle.join(common::exe("consumer")).to_str().unwrap(),
+            &[],
+            commands,
+            Duration::from_secs(30),
+        );
+        assert_eq!(answer.0, 0, "{}", answer.2);
+        assert!(answer.2.is_empty(), "{}", answer.2);
+        answer.1
+    };
+    let save = tmp.0.join("enumeration.zsave");
+    let output = play(&format!("!0\n!1\n!0\n!3\n!2\n:save {}\n", save.display()));
+    let rows: Vec<_> = output
+        .lines()
+        .filter(|l| l.starts_with("[enumeration"))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "[enumeration 3 6]",
+            "[enumeration 4 10]",
+            "[enumeration 3 6]",
+            "[enumeration 3 6]",
+            "[enumeration 2 4]"
+        ]
+    );
+    assert!(output.contains("[save ok code=0]"));
+    let restored = play(&format!(":restore {}\n!0\n!1\n!0\n", save.display()));
+    assert!(restored.contains("[restore ok code=0]"));
+    let rows: Vec<_> = restored
+        .lines()
+        .filter(|l| l.starts_with("[enumeration"))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "[enumeration 2 4]",
+            "[enumeration 3 8]",
+            "[enumeration 2 4]"
+        ]
+    );
+}
+
+#[test]
+#[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and host native prerequisites"]
 fn world_rollback_and_process_boundary_persistence() {
     let tmp = TempDir::new("world-state");
     let bundle = build(
