@@ -77,11 +77,11 @@ pub fn build(
             let object = format!("{arch}.o");
             let usage = format!("{arch}.su");
             fs::write(out.join(&file), module).map_err(|e| e.to_string())?;
-            let verification = run(
+            let verification = zebc::process::run_build(
                 &out,
                 &tools.tool("opt"),
                 &["-passes=verify", "-disable-output", &file],
-                timeout,
+                &[],
             )?;
             fs::write(out.join(format!("{arch}-verify.txt")), verification)
                 .map_err(|e| e.to_string())?;

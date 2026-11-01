@@ -69,6 +69,7 @@ jobs:
       - name: Check repository
         run: python -X utf8 tools/check_repository.py
       - name: Build release compiler and runtime
+        if: runner.os != 'macOS'
         run: cargo build --workspace --release --locked
       - name: Build and verify universal macOS compiler
         if: runner.os == 'macOS'
@@ -76,7 +77,7 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: '14.0'
         run: |
-          cargo build -p zebc --release --locked --target aarch64-apple-darwin --target x86_64-apple-darwin
+          cargo build --workspace --release --locked --target aarch64-apple-darwin --target x86_64-apple-darwin
           llvm_bin="$("$ZEB_LLVM_CONFIG" --bindir)"
           mkdir -p target/universal
           "$llvm_bin/llvm-lipo" -create target/aarch64-apple-darwin/release/zebc target/x86_64-apple-darwin/release/zebc -output target/universal/zebc

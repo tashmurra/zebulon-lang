@@ -61,6 +61,8 @@ cargo run --locked -p zebc -- build examples/scalar.t --model ownership --emit s
 
 On Windows, use `build/scalar/consumer.exe 20`. The consumer prints `41`. Output directories must be new: choose another output name to repeat a build. The compiler refuses to overwrite an existing bundle. A shared bundle contains native libraries, a generated header, a manifest and a working C consumer.
 
+Native compilation has no default time limit. Automation can set `ZEB_BUILD_TIMEOUT_SECS`; object/world builds can reuse their runtime with `--runtime-cache DIR`. See [build duration and deadlines](docs/development.md#native-build-duration-and-deadlines).
+
 ## A host-driven world
 
 `examples/world.t` models a probe on a bench. Action 1 increments its reading; action 2 undoes the last completed turn.

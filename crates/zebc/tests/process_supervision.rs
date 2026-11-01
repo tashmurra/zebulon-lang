@@ -10,6 +10,25 @@ use std::{io::Write, process::Command, time::Duration};
 fn process_fixture() {
     match std::env::var("ZEB_PROCESS_FIXTURE").as_deref() {
         Ok("sleep") => std::thread::sleep(Duration::from_secs(5)),
+        Ok("compile") => {
+            let exe = std::env::current_exe().unwrap();
+            match zebc::process::run_build(
+                &std::env::current_dir().unwrap(),
+                exe.to_str().unwrap(),
+                &["--exact", "process_fixture", "--ignored", "--nocapture"],
+                &[("ZEB_PROCESS_FIXTURE", "work")],
+            ) {
+                Ok(text) => print!("{text}"),
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(3);
+                }
+            }
+        }
+        Ok("work") => {
+            std::thread::sleep(Duration::from_millis(1200));
+            println!("compilation finished");
+        }
         Ok("flood") => {
             let mut out = std::io::stdout().lock();
             for _ in 0..4096 {
@@ -53,5 +72,46 @@ fn native_process_trees_are_bounded_on_every_host() {
         )
         .unwrap_err();
         assert!(error.contains(expected), "{mode}: {error}");
+    }
+}
+
+#[test]
+fn compilation_deadline_is_optional_and_reports_the_command() {
+    let temp = common::TempDir::new("compile timeout paths with spaces");
+    let exe = std::env::current_exe().unwrap();
+    for setting in [None, Some("0"), Some("1"), Some("invalid")] {
+        let mut environment = vec![("ZEB_PROCESS_FIXTURE", "compile")];
+        if let Some(setting) = setting {
+            environment.push(("ZEB_BUILD_TIMEOUT_SECS", setting));
+        }
+        // run_env clears the parent environment, so these cases are isolated
+        // without mutating global environment variables in parallel tests.
+        let result = zebc::process::run_env(
+            &temp.0,
+            exe.to_str().unwrap(),
+            &["--exact", "process_fixture", "--ignored", "--nocapture"],
+            &environment,
+            Duration::from_secs(10),
+        );
+        match setting {
+            None | Some("0") => assert!(result.unwrap().contains("compilation finished")),
+            Some("1") => {
+                let error = result.unwrap_err();
+                for expected in [
+                    "tool deadline exceeded",
+                    "limit 1.000s",
+                    "--exact",
+                    "working directory:",
+                    temp.0.to_str().unwrap(),
+                ] {
+                    assert!(error.contains(expected), "{error}");
+                }
+            }
+            _ => assert!(
+                result
+                    .unwrap_err()
+                    .contains("ZEB_BUILD_TIMEOUT_SECS must be")
+            ),
+        }
     }
 }

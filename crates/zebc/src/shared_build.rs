@@ -12,7 +12,7 @@ fn write(dir: &Path, name: &str, contents: impl AsRef<[u8]>) -> Result<(), Strin
     fs::write(dir.join(name), contents).map_err(|e| e.to_string())
 }
 fn command(dir: &Path, program: &str, args: &[&str]) -> Result<String, String> {
-    run(dir, program, args, Duration::from_secs(60))
+    zebc::process::run_build(dir, program, args, &[])
 }
 fn hash(dir: &Path, file: &str) -> Result<String, String> {
     zebc::digest::file(&dir.join(file))
@@ -132,7 +132,7 @@ pub fn build(
             ("opt", tools.tool("opt"), "version 22.1.8"),
             ("clang", tools.tool("clang"), "version 22.1.8"),
         ] {
-            let text = command(&out, &program, &["--version"])?;
+            let text = run(&out, &program, &["--version"], Duration::from_secs(60))?;
             if !text.contains(expected) {
                 return Err(format!("wrong {name} version"));
             }
@@ -580,9 +580,14 @@ fn full_link(folder: &Path, target: Target, game: &str, tools: &Toolchain) -> Re
         game,
     ]);
     command(folder, &tools.tool("clang"), &native_link)?;
-    let sections = command(folder, &tools.otool, &["-l", "game-final.o", game])?;
+    let sections = run(
+        folder,
+        &tools.otool,
+        &["-l", "game-final.o", game],
+        Duration::from_secs(60),
+    )?;
     write(folder, "lto-sections.txt", sections)?;
-    let closure = command(folder, &tools.otool, &["-L", game])?;
+    let closure = run(folder, &tools.otool, &["-L", game], Duration::from_secs(60))?;
     for line in closure.lines().filter(|line| line.starts_with('\t')) {
         let dependency = line.trim().split(" (").next().ok_or("missing dependency")?;
         if dependency != format!("@rpath/{game}")
@@ -682,10 +687,11 @@ fn portable_full_link(
     let mut native = tools.shared_args(target, game);
     native.extend(["game-final.o".into(), "-o".into(), game.into()]);
     tools.clang(folder, target, &native)?;
-    let sections = command(
+    let sections = run(
         folder,
         &tools.tool("llvm-readobj"),
         &["--sections", "game-final.o", game],
+        Duration::from_secs(60),
     )?;
     write(folder, "lto-sections.txt", sections)?;
     write(

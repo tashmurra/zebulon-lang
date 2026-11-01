@@ -1,4 +1,4 @@
-//! Bounded subprocess supervision shared by the compiler and native test harness.
+//! Subprocess supervision shared by the compiler and native test harness.
 use std::{
     io::Read,
     path::Path,
@@ -54,7 +54,15 @@ pub fn run_env(
     environment: &[(&str, &str)],
     timeout: Duration,
 ) -> Result<String, String> {
-    run_inner(dir, program, args, timeout, LOG_LIMIT, false, environment)
+    run_inner(
+        dir,
+        program,
+        args,
+        Some(timeout),
+        LOG_LIMIT,
+        false,
+        environment,
+    )
 }
 pub fn run(dir: &Path, program: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
     run_bounded(dir, program, args, timeout, LOG_LIMIT)
@@ -67,7 +75,7 @@ pub fn read_stdout(
     args: &[&str],
     timeout: Duration,
 ) -> Result<String, String> {
-    run_inner(dir, program, args, timeout, LOG_LIMIT, true, &[])
+    run_inner(dir, program, args, Some(timeout), LOG_LIMIT, true, &[])
 }
 
 pub fn run_bounded(
@@ -77,7 +85,29 @@ pub fn run_bounded(
     timeout: Duration,
     limit: usize,
 ) -> Result<String, String> {
-    run_inner(dir, program, args, timeout, limit, false, &[])
+    run_inner(dir, program, args, Some(timeout), limit, false, &[])
+}
+
+/// Native compilation has no wall-clock deadline by default. Automation can
+/// opt into a per-command limit without changing probe or test deadlines.
+pub fn run_build(
+    dir: &Path,
+    program: &str,
+    args: &[&str],
+    environment: &[(&str, &str)],
+) -> Result<String, String> {
+    let timeout = build_timeout(std::env::var_os("ZEB_BUILD_TIMEOUT_SECS").as_deref())?;
+    run_inner(dir, program, args, timeout, LOG_LIMIT, false, environment)
+}
+
+fn build_timeout(value: Option<&std::ffi::OsStr>) -> Result<Option<Duration>, String> {
+    let Some(value) = value else { return Ok(None) };
+    let seconds = value
+        .to_str()
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or("ZEB_BUILD_TIMEOUT_SECS must be a nonnegative integer (0 disables the deadline)")?;
+    Ok((seconds != 0).then(|| Duration::from_secs(seconds)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -85,7 +115,7 @@ fn run_inner(
     dir: &Path,
     program: &str,
     args: &[&str],
-    timeout: Duration,
+    timeout: Option<Duration>,
     limit: usize,
     stdout_only: bool,
     environment: &[(&str, &str)],
@@ -148,17 +178,25 @@ fn run_inner(
     let stderr = reader(err.expect("piped stderr"), exceeded.clone(), limit);
     let start = Instant::now();
     let status = loop {
-        if exceeded.load(Ordering::SeqCst) || start.elapsed() >= timeout {
+        if exceeded.load(Ordering::SeqCst) || timeout.is_some_and(|limit| start.elapsed() >= limit)
+        {
             kill_group(&mut child);
             // Killing the process group closes its pipes before joining readers.
             let _ = stdout.join();
             let _ = stderr.join();
-            return Err(if exceeded.load(Ordering::SeqCst) {
-                "tool output limit exceeded"
+            let reason = if exceeded.load(Ordering::SeqCst) {
+                "tool output limit exceeded".to_owned()
             } else {
-                "tool deadline exceeded"
-            }
-            .to_owned());
+                format!(
+                    "tool deadline exceeded after {:.3}s (limit {:.3}s)",
+                    start.elapsed().as_secs_f64(),
+                    timeout.expect("deadline enabled").as_secs_f64()
+                )
+            };
+            return Err(format!(
+                "{reason}: {program} {args:?} (working directory: {})",
+                dir.display()
+            ));
         }
         if stdout.is_finished() && stderr.is_finished() {
             match child.try_wait() {
@@ -324,4 +362,35 @@ pub fn capture(
         let _ = fs::remove_file(path);
     }
     result
+}
+
+#[cfg(test)]
+mod build_timeout_tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn compilation_deadlines_are_opt_in_and_validated() {
+        assert_eq!(build_timeout(None).unwrap(), None);
+        assert_eq!(build_timeout(Some(OsStr::new("0"))).unwrap(), None);
+        assert_eq!(
+            build_timeout(Some(OsStr::new("600"))).unwrap(),
+            Some(Duration::from_secs(600))
+        );
+        for invalid in [
+            "",
+            "-1",
+            "+1",
+            "1.5",
+            " 60",
+            "never",
+            "18446744073709551616",
+        ] {
+            assert!(
+                build_timeout(Some(OsStr::new(invalid)))
+                    .unwrap_err()
+                    .contains("ZEB_BUILD_TIMEOUT_SECS")
+            );
+        }
+    }
 }
