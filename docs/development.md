@@ -113,23 +113,47 @@ Release builds on macOS use only the two explicit target builds above; CI does
 not first build another host release compiler. Debug/test-profile builds remain
 separate because they validate the workspace and native suite.
 
+Each PR revision builds and tests its explicit head commit on all three
+platforms. On a push to `main`, a small selection job looks for a successful PR
+run with an identical Git tree (all tracked files, including toolchain pins and
+the workflow). It verifies that all three native jobs passed and all three
+compiler artifacts are still available with SHA-256 digests. When they match,
+the native matrix is skipped and the merge run's summary links to the original
+PR artifacts. No compiler is rebuilt or copied merely because its source now
+has a merge commit hash.
+
+A changed merge tree, unavailable artifacts or a failed lookup runs the normal
+build and test matrix. Selection checks the latest 100 successful PR runs of
+this workflow and does not follow other reuse-only runs. PR checks cover the PR
+head; integration changes introduced by merging are validated by the fallback
+main build. Manual `workflow_dispatch` runs always build and test, providing an
+explicit way to regenerate artifacts. Tag pushes do not trigger this workflow.
+Run `python3 tools/test_ci_reuse.py` for the offline artifact-selection tests.
+
 ### Release from tested CI artifacts
 
 Include the intended package version and lockfile update in the implementation
 PR, before its CI build. After merging, wait for the main-branch CI run at the
-exact release commit to succeed on all three platforms. Download its
-`zebc-linux-x86_64`, `zebc-windows-x86_64` and `zebc-macos-universal` artifacts;
-package those binaries with `LICENSE` and generate archive SHA-256 checksums.
-Verify the run's commit, all platform results, binary architectures and reported
-compiler version before publishing. Restore executable permissions when unpacking
-Actions artifacts on macOS/Linux. Record the CI run URL and commit in the release
-notes, and tag that same commit.
+release commit to succeed. If it reused a PR build, follow the original run link
+in its summary; otherwise use the main run's own artifacts. Download
+`zebc-linux-x86_64`, `zebc-windows-x86_64` and `zebc-macos-universal`, verify their
+downloaded ZIP checksums against GitHub's artifact digests, package the binaries
+with `LICENSE`, and generate archive SHA-256 checksums.
+
+Before publishing, independently verify that the source run succeeded, all three
+native jobs passed, artifacts are unexpired, and the built commit's Git tree is
+identical to the release commit's tree. Verify binary architectures and the
+reported compiler version. Restore executable permissions when unpacking Actions
+artifacts on macOS/Linux. Record the original CI run URL, built commit, source
+tree and release commit in the release notes. Tag the release commit on `main`.
+When the merge reused artifacts, the original PR commit and release commit will
+usually differ; their source trees must not.
 
 Packaging and publishing do not need another compiler build. Do not substitute
-local binaries or artifacts from a different commit. If the version or compiler
-source changes, obtain artifacts from a successful CI run of that new commit.
-PR CI and main-branch CI remain separate validation runs; reuse here avoids a
-third release build and a separate version-only PR/build cycle.
+local binaries or artifacts from a different source tree. If the version,
+compiler source or build recipe changes, obtain artifacts from a successful CI
+run of that new tree. A normal PR, unchanged merge and release therefore use one
+native build/test matrix, without a separate version-only PR/build cycle.
 
 ### Platform validation
 

@@ -31,6 +31,11 @@ An invalid explicit setting is an error. Tool versions and the required Rust tar
 
 CI builds and tests the Rust workspace and generated native programs on Linux x86-64, Windows x86-64 and Apple Silicon macOS. The macOS job combines Intel and Apple Silicon compiler builds into the `zebc-macos-universal` artifact. Both that compiler and its generated macOS programs are universal; CI executes only Apple Silicon, so Intel execution is not covered. Linux and Windows compiler artifacts are x86-64. Download them from the successful run’s Artifacts section in GitHub Actions. After extracting on macOS or Linux, run `chmod +x zebc` to restore executable permission. Native builds require the external prerequisites above.
 
+An unchanged merge reuses the successful PR build; its CI summary links to the
+original artifacts. Releases package those same binaries, and tags do not start
+another build. Changed merge sources or unavailable artifacts trigger a normal
+build. See [CI and release reuse](docs/development.md#release-from-tested-ci-artifacts).
+
 From the repository root:
 
 ```sh
