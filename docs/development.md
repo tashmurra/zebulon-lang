@@ -40,6 +40,32 @@ Existing Makefiles that export `ZEB_LLD="$(brew --prefix lld@22)/bin/ld64.lld"` 
 
 Alternatively, put the matching LLD bin directory on `PATH`. The formula names alone do not guarantee the pinned patch version; the compiler validates the installed tools. The output directory must be new. Universal output is verified with separate `lipo -verify_arch` calls for `x86_64` and `arm64`, accommodating Apple lipo variants that interpret a second architecture as another input file. Both slices must pass verification before the bundle is marked complete.
 
+### Native build duration and deadlines
+
+Native compilation and linking have no wall-clock deadline by default. Large
+optimized programs and cold runtime builds can legitimately take several minutes.
+Set `ZEB_BUILD_TIMEOUT_SECS` to a positive integer to impose a per-command deadline
+in automation; unset it or use `0` to disable that deadline. This covers Rust,
+Clang, LLVM verification and scalar LTO build commands. It is not a total build
+budget. Tool discovery, artifact inspection and native test execution retain
+separate bounded deadlines. Output limits and process-tree cleanup still apply.
+Deadline errors report the executable, arguments, working directory, elapsed time
+and configured limit, so the failing architecture and stage can be identified.
+
+Object/world builds compile the embedded Rust runtime and generated game code for
+each host slice. macOS builds both x86-64 and arm64 sequentially. `--opt O2`
+optimizes both runtime and game code; no Cargo incremental cache is used for these
+embedded runtime compilations. Use the same explicit runtime cache directory
+across builds to avoid recompiling an unchanged runtime:
+
+```sh
+zebc build examples/world.t --opt O2 --emit shared --runtime-cache build/runtime-cache --out-dir build/world-cached
+```
+
+The output directory must be new each time. The cache is opt-in and checks runtime
+sources, toolchain, recipe and architecture; program-only changes can reuse it,
+while compiler/runtime, optimization or toolchain changes may require a cold build.
+
 ## Tests
 
 Use the commands in the README. `cargo test --workspace --locked` runs the ordinary suite. Frontend integration tests are grouped by syntax, semantics, values, world features and lowering. Runtime tests cover storage, identity, cleanup, grammar, history, save data and sessions. Compiler tests cover CLI diagnostics, manifests, data tables, tool resolution, caches and generated-code constraints.
@@ -82,6 +108,30 @@ does not include an application's UI rendering or transport overhead.
 ## Clean-checkout checks and CI
 
 The CI workflow runs formatting, workspace tests, Clippy, repository checks, release builds and the native suite on Ubuntu 24.04 x86-64, Windows Server 2025 x86-64, Apple Silicon macOS 15. The bootstrap’s `--config-out PATH` writes JSON containing `llvm_config` for shell-independent configuration. Extracted LLVM installation caches include host OS/architecture and a recipe revision. The macOS runner builds `zebc` for both `aarch64-apple-darwin` and `x86_64-apple-darwin` with deployment target 14.0, combines them with the resolved `llvm-lipo`, verifies both slices and uses the universal compiler to build and execute a sample. It uploads `target/universal/zebc` as `zebc-macos-universal`. Both the compiler and generated macOS output are universal, but CI executes only Apple Silicon; Intel execution is not covered. Linux and Windows upload their host-native x86-64 compilers. Ordinary `cargo build` and `cargo install` still produce a compiler for their selected Rust target.
+
+Release builds on macOS use only the two explicit target builds above; CI does
+not first build another host release compiler. Debug/test-profile builds remain
+separate because they validate the workspace and native suite.
+
+### Release from tested CI artifacts
+
+Include the intended package version and lockfile update in the implementation
+PR, before its CI build. After merging, wait for the main-branch CI run at the
+exact release commit to succeed on all three platforms. Download its
+`zebc-linux-x86_64`, `zebc-windows-x86_64` and `zebc-macos-universal` artifacts;
+package those binaries with `LICENSE` and generate archive SHA-256 checksums.
+Verify the run's commit, all platform results, binary architectures and reported
+compiler version before publishing. Restore executable permissions when unpacking
+Actions artifacts on macOS/Linux. Record the CI run URL and commit in the release
+notes, and tag that same commit.
+
+Packaging and publishing do not need another compiler build. Do not substitute
+local binaries or artifacts from a different commit. If the version or compiler
+source changes, obtain artifacts from a successful CI run of that new commit.
+PR CI and main-branch CI remain separate validation runs; reuse here avoids a
+third release build and a separate version-only PR/build cycle.
+
+### Platform validation
 
 Experimental physical-stack qualification remains macOS-specific and rejects new targets explicitly; production executable, object, static/shared and world modes are tested on all supported hosts. Full LTO remains restricted to optimized scalar shared bundles. Every host must execute successfully before reporting execution validation for it. A generated workflow or cross-target check is not a successful native CI run.
 

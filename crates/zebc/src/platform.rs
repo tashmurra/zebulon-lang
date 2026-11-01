@@ -110,12 +110,11 @@ impl Toolchain {
         } else {
             vec![]
         };
-        process::run_env(
+        process::run_build(
             dir,
             program,
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
             &environment,
-            Duration::from_secs(120),
         )
     }
     pub fn clang(&self, dir: &Path, target: Target, args: &[String]) -> Result<String, String> {
