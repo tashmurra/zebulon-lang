@@ -9,9 +9,28 @@ concurrency:
   cancel-in-progress: true
 permissions:
   contents: read
+  actions: read
 jobs:
+  artifacts:
+    name: Select tested artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run_id: ${{ steps.reuse.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Reuse an identical successful PR build
+        id: reuse
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/ci_reuse.py --github-output "$GITHUB_OUTPUT" --github-summary "$GITHUB_STEP_SUMMARY"
   native:
     name: Native build (${{ matrix.os }})
+    needs: artifacts
+    if: needs.artifacts.outputs.run_id == ''
     strategy:
       fail-fast: false
       matrix:
@@ -29,6 +48,10 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Build the exact source commit recorded by the run API. A merge with
+          # an identical tree can reuse this build; changed merge trees rebuild.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -66,6 +89,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test prebuilt LLVM bootstrap
         run: python tools/test_bootstrap_llvm.py
+      - name: Test CI artifact selection
+        run: python tools/test_ci_reuse.py
       - name: Check repository
         run: python -X utf8 tools/check_repository.py
       - name: Build release compiler and runtime
