@@ -53,10 +53,14 @@ Deadline errors report the executable, arguments, working directory, elapsed tim
 and configured limit, so the failing architecture and stage can be identified.
 
 Object/world builds compile the embedded Rust runtime and generated game code for
-each host slice. macOS builds both x86-64 and arm64 sequentially. `--opt O2`
-optimizes both runtime and game code; no Cargo incremental cache is used for these
-embedded runtime compilations. Use the same explicit runtime cache directory
-across builds to avoid recompiling an unchanged runtime:
+each host slice. macOS builds both x86-64 and arm64 sequentially. `--opt`
+chooses how the game code is compiled. The embedded runtime is always compiled
+optimized: every object operation runs through it, so an unoptimized runtime
+makes an `O0` program several times slower while saving only a few seconds of a
+cold build. `O0` and `O2` builds therefore use the same runtime library and the
+same cache entry. No Cargo incremental cache is used for these embedded runtime
+compilations. Use the same explicit runtime cache directory across builds to
+avoid recompiling an unchanged runtime:
 
 ```sh
 zebc build examples/world.t --opt O2 --emit shared --runtime-cache build/runtime-cache --out-dir build/world-cached
@@ -80,24 +84,47 @@ This is a real native test request: a missing tool or target library fails it. N
 
 Add a focused regression at the layer where the defect occurs. Tests of compiler/runtime behavior must use repository-owned fixtures or inline programs, not external games or private downloads. Put shared native helpers in the existing test support module. Keep expected values independent of the emitter/runtime being tested. Do not delete unique assertions simply to reduce test-file count.
 
-### Object enumeration performance
+### Object enumeration and inheritance performance
 
-The runtime keeps a sorted vector of live record IDs alongside its object map.
-`firstObj`/`nextObj` seek after the supplied logical slot and visit subsequent
-records once, rather than repeatedly searching the entire hash table for the
-next ID. Class and inheritance filters are evaluated against current records;
-the index caches neither membership nor handles. Enumeration therefore retains
-ascending slot order, current incarnation checks and visibility of prototype
-changes between calls.
+The runtime keeps a sorted vector of live record IDs alongside its object map,
+and derives two views from the inheritance graph the first time each is needed:
+
+- for a record that `firstObj`/`nextObj` is asked about, the sorted IDs of the
+  live records that descend from it. A class walk seeks after the supplied
+  logical slot in that list and visits only descendants, so its cost follows the
+  size of the class and not the number of live records;
+- for a record with several prototypes, its lookup order (itself, then each
+  ancestor once). Property reads, `inherited` reads, definer queries and
+  `ofKind` use it instead of searching the graph again. Single-prototype chains
+  are followed directly and need neither a search nor an allocation.
+
+The views cache only what the records already say. Appending a prototype to a
+record nothing inherits from adds that record to the lists of its new ancestors;
+destroying such a record removes it from every list. Any other change to
+inheritance (a prototype appended to, or the destruction of, a record that
+something inherits from; rollback of a prototype list; a terminal failure)
+discards both views, and restore starts with none. A view is never built from a
+graph containing an expired prototype: those walks and tests fall back to the
+record-by-record search, which reports the expiry at the same point as before.
+Enumeration therefore retains ascending slot order, current incarnation checks
+and visibility of prototype and class-mark changes between calls. Class marks
+are read from the record at each step and are not cached.
+
+Internal maps keyed by runtime-assigned IDs (records, properties, statics) use a
+one-multiply hasher instead of the standard keyed hash. Their iteration order
+was never defined and still is not; code must not depend on it.
 
 Creation reserves index capacity before publishing an object. Destruction removes
 its ID, including recursive cleanup and Turn expiry. Restore reuses the validated,
 sorted ID list from the existing save format, and failed restores leave the old
-store intact. The index requires one `u64` per live record plus vector capacity;
-inserting a reused slot and removing a record can shift O(n) IDs. This trades
-mutation work for cheaper enumeration, so performance comparisons should include
-allocation/cleanup workloads as well as repeated class walks. Sparse logical IDs
-do not require scanning the gaps or allocating storage up to the highest ID.
+store intact. The ID index requires one `u64` per live record plus vector
+capacity; each descendant list holds one `u64` per descendant of a class that has
+been walked, and each kept order one handle per ancestor. Inserting a reused slot
+and removing a record can shift O(n) IDs, and destroying a record that has
+prototypes searches each kept list. This trades mutation work for cheaper
+enumeration, so performance comparisons should include allocation/cleanup
+workloads as well as repeated class walks. Sparse logical IDs do not require
+scanning the gaps or allocating storage up to the highest ID.
 
 Measure code changes at the same optimization level first, then compare native
 `--opt O2` builds. Keep benchmark data and native fingerprints under ignored

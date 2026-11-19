@@ -712,13 +712,13 @@ int main(int argc, char **argv) {{
 
 // The same argument recipe is hashed and executed. Placeholder output/install
 // names break the digest/name recursion; real paths are remapped in the binary.
-fn runtime_args(
-    runtime: &str,
-    out: &str,
-    optimize: bool,
-    target: Target,
-    tools: &Toolchain,
-) -> Vec<String> {
+//
+// The runtime is optimized whatever `--opt` says. That option chooses how the
+// program is compiled, which is where an unoptimized build saves its time; an
+// unoptimized runtime saves a few seconds once and then costs several times
+// over on every object operation the program performs. One recipe also means
+// O0 and O2 builds of a program name, and can share, the same cached runtime.
+fn runtime_args(runtime: &str, out: &str, target: Target, tools: &Toolchain) -> Vec<String> {
     let mut args = vec![
         "--edition=2024".into(),
         "--remap-path-prefix".into(),
@@ -732,7 +732,7 @@ fn runtime_args(
         "-C".into(),
         format!("target-cpu={}", target.cpu()),
         "-C".into(),
-        format!("opt-level={}", if optimize { 2 } else { 0 }),
+        "opt-level=2".into(),
         "../runtime.rs".into(),
         "-o".into(),
         runtime.into(),
@@ -838,7 +838,7 @@ pub fn build(
         let recipes = host
             .slices()
             .iter()
-            .map(|&target| runtime_args("RUNTIME", "OUTPUT", optimize, target, &tools).join("\n"))
+            .map(|&target| runtime_args("RUNTIME", "OUTPUT", target, &tools).join("\n"))
             .collect::<Vec<_>>()
             .join("\n");
         write(
@@ -926,7 +926,7 @@ pub fn build(
                 let rust_log = tools.run(
                     &dir,
                     &rustc,
-                    &runtime_args(&runtime, &out.to_string_lossy(), optimize, target, &tools),
+                    &runtime_args(&runtime, &out.to_string_lossy(), target, &tools),
                 )?;
                 write(&dir, "rust-build.txt", rust_log)?;
                 if let Some(path) = &cached {

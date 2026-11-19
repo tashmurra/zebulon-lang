@@ -724,7 +724,9 @@ fn copied_compiler_and_relocated_world_bundle_keep_working() {
     let source = tmp.0.join("world.t");
     fs::write(&source, include_str!("../../../examples/world.t")).unwrap();
     let cache = tmp.0.join("runtime cache");
-    for name in ["first", "second"] {
+    // The runtime is built optimized whichever way the program is, so an O0
+    // build finds the library an O2 build of the same sources published.
+    for (name, opt) in [("first", "O2"), ("second", "O0")] {
         let output = tmp.0.join(name);
         let result = capture(
             &tmp.0,
@@ -738,6 +740,8 @@ fn copied_compiler_and_relocated_world_bundle_keep_working() {
                 output.to_str().unwrap(),
                 "--runtime-cache",
                 cache.to_str().unwrap(),
+                "--opt",
+                opt,
             ],
             "",
             Duration::from_secs(240),
