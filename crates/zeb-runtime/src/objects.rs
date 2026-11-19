@@ -3,8 +3,51 @@
 mod history;
 mod persistence;
 pub use history::ContainerDelta;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Hasher for maps keyed by runtime-assigned identifiers (record slots,
+/// property and static ids). Those keys are small integers the runtime or the
+/// compiler chose, so a keyed hash defends against nothing and costs a large
+/// share of every property read. One multiply spreads sequential ids over the
+/// table; the final rotation moves the well-mixed high bits to where the table
+/// takes its bucket index.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct IdHasher(u64);
+impl IdHasher {
+    #[inline]
+    fn mix(&mut self, word: u64) {
+        self.0 = self
+            .0
+            .wrapping_add(word)
+            .wrapping_mul(0xf135_7aea_2e62_a9c5);
+    }
+}
+impl Hasher for IdHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.mix(u64::from_le_bytes(word));
+        }
+    }
+    #[inline]
+    fn write_u32(&mut self, word: u32) {
+        self.mix(u64::from(word));
+    }
+    #[inline]
+    fn write_u64(&mut self, word: u64) {
+        self.mix(word);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0.rotate_left(26)
+    }
+}
+pub(crate) type IdMap<K, V> = HashMap<K, V, BuildHasherDefault<IdHasher>>;
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
@@ -239,10 +282,37 @@ struct Record {
     collection: Option<Vec<OwnedMember>>,
     parent: Option<ObjectRef>,
     prototypes: Vec<ObjectRef>,
+    /// Whether any record has ever named this one as a prototype. It is never
+    /// cleared, so it may overstate; it decides whether a change to this record
+    /// can alter what other records inherit.
+    extended: bool,
     children: Vec<ObjectRef>,
-    properties: HashMap<PropertyId, Value>,
-    owned_value_fields: HashMap<PropertyId, ObjectRef>,
-    pending_constructions: HashMap<PropertyId, PendingConstruction>,
+    properties: IdMap<PropertyId, Value>,
+    owned_value_fields: IdMap<PropertyId, ObjectRef>,
+    pending_constructions: IdMap<PropertyId, PendingConstruction>,
+}
+
+/// Views derived from the inheritance graph, kept so that property reads, kind
+/// tests and class walks need not search the graph (or the whole store) again.
+///
+/// Both hold only what the records already say. Every change to a prototype
+/// list, and every destruction, either updates them exactly or empties them, so
+/// a present entry always equals what a fresh search would find. An entry is
+/// never built from a graph that contains an expired prototype; such a graph is
+/// answered by the uncached search, which reports the expiry.
+#[derive(Default)]
+struct Kinds {
+    /// Lookup order (the record first, then each ancestor once) by record slot,
+    /// for records whose order is not a single chain of prototypes.
+    orders: RefCell<IdMap<u64, Vec<ObjectRef>>>,
+    /// Sorted slots of the live records that descend from the keyed record.
+    derived: RefCell<IdMap<u64, Vec<u64>>>,
+}
+impl Kinds {
+    fn forget(&mut self) {
+        self.orders.get_mut().clear();
+        self.derived.get_mut().clear();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -271,11 +341,12 @@ pub struct Store {
     journalling: bool,
     next_reservation: u64,
     pending_constructions: usize,
-    records: HashMap<u64, Record>,
+    records: IdMap<u64, Record>,
     // Sorted live record slots. Stores IDs rather than handles so slot reuse
     // cannot retain an expired incarnation. Capacity is admitted at creation.
     record_order: Vec<u64>,
-    statics: HashMap<u32, ObjectRef>,
+    kinds: Kinds,
+    statics: IdMap<u32, ObjectRef>,
     class_property: Option<PropertyId>,
     roots: Vec<ObjectRef>,
     cleanup: Vec<Cleanup>,
@@ -311,9 +382,10 @@ impl Store {
             journalling: false,
             next_reservation: 1,
             pending_constructions: 0,
-            records: HashMap::new(),
+            records: IdMap::default(),
             record_order: Vec::new(),
-            statics: HashMap::new(),
+            kinds: Kinds::default(),
+            statics: IdMap::default(),
             class_property: None,
             roots: Vec::new(),
             cleanup: Vec::new(),
@@ -492,6 +564,145 @@ impl Store {
 
     // Reverse postorder with rightmost branches first retains the last occurrence
     // of each class in the expanded preorder, without expanding duplicate subgraphs.
+    fn search_order(&self, start: ObjectRef) -> Result<Vec<ObjectRef>, Error> {
+        let count = self.records.len();
+        let mut frames = Vec::new();
+        let mut order = Vec::new();
+        let mut seen = HashSet::new();
+        frames.try_reserve(count).map_err(|_| Error::Allocation)?;
+        order.try_reserve(count).map_err(|_| Error::Allocation)?;
+        seen.try_reserve(count).map_err(|_| Error::Allocation)?;
+        frames.push((start, 0usize));
+        seen.insert(start);
+        while let Some((current, next)) = frames.pop() {
+            let record = self.record(current)?;
+            if next < record.prototypes.len() {
+                let parent = record.prototypes[record.prototypes.len() - 1 - next];
+                self.record(parent)?;
+                frames.push((current, next + 1));
+                if seen.insert(parent) {
+                    frames.push((parent, 0));
+                }
+            } else {
+                order.push(current);
+            }
+        }
+        order.reverse();
+        // The search reserved for the whole store; what is kept is one entry
+        // per ancestor.
+        order.shrink_to_fit();
+        Ok(order)
+    }
+
+    /// Visit the lookup order from `start`: the record itself, then each
+    /// ancestor once. The order is searched for once and kept until the
+    /// inheritance it was read from changes.
+    fn with_order<T>(
+        &self,
+        start: ObjectRef,
+        visit: impl FnOnce(&[ObjectRef]) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        self.record(start)?;
+        if let Some(order) = self.kinds.orders.borrow().get(&start.logical) {
+            return visit(order);
+        }
+        let order = self.search_order(start)?;
+        let result = visit(&order);
+        let mut orders = self.kinds.orders.borrow_mut();
+        if orders.try_reserve(1).is_ok() {
+            orders.insert(start.logical, order);
+        }
+        result
+    }
+
+    /// Whether `ancestor` is a transitive prototype of `object`, which is not
+    /// `ancestor` itself. Follows single prototypes directly and consults the
+    /// kept order at the first record with several.
+    fn inherits(&self, object: ObjectRef, ancestor: ObjectRef) -> Result<bool, Error> {
+        let mut current = object;
+        loop {
+            match self.record(current)?.prototypes.as_slice() {
+                [] => return Ok(false),
+                [parent] => {
+                    self.record(*parent)?;
+                    if *parent == ancestor {
+                        return Ok(true);
+                    }
+                    current = *parent;
+                }
+                _ => break,
+            }
+        }
+        self.with_order(current, |order| Ok(order[1..].contains(&ancestor)))
+    }
+
+    /// Build the list of live records that descend from `ancestor`. Returns
+    /// false, keeping nothing, if any candidate cannot be classified; the
+    /// caller's record-by-record walk then reports that candidate's error at
+    /// the point the walk reaches it.
+    fn index_derived(&self, ancestor: ObjectRef) -> bool {
+        let mut ids = Vec::new();
+        for &id in &self.record_order {
+            let record = &self.records[&id];
+            if record.prototypes.is_empty() {
+                continue;
+            }
+            let Some(candidate) = self.reference_to(id) else {
+                continue;
+            };
+            if candidate == ancestor {
+                continue;
+            }
+            match self.inherits(candidate, ancestor) {
+                Ok(true) if ids.try_reserve(1).is_ok() => ids.push(id),
+                Ok(false) => {}
+                _ => return false,
+            }
+        }
+        let mut derived = self.kinds.derived.borrow_mut();
+        if derived.try_reserve(1).is_err() {
+            return false;
+        }
+        derived.insert(ancestor.logical, ids);
+        true
+    }
+
+    /// Bring the kept views up to date after `prototype` was appended to
+    /// `object`'s prototypes.
+    fn note_prototype(&mut self, object: ObjectRef, prototype: ObjectRef) {
+        self.records
+            .get_mut(&prototype.logical)
+            .expect("validated object")
+            .extended = true;
+        if self.records[&object.logical].extended {
+            // Everything that inherits from `object` inherits more now.
+            self.kinds.forget();
+            return;
+        }
+        self.kinds.orders.get_mut().remove(&object.logical);
+        if self.kinds.derived.get_mut().is_empty() {
+            return;
+        }
+        // Nothing inherits from `object`, so the only change is that it now
+        // descends from `prototype` and from each of its ancestors.
+        let updated = self.with_order(prototype, |order| {
+            let mut derived = self.kinds.derived.borrow_mut();
+            for ancestor in order {
+                let Some(ids) = derived.get_mut(&ancestor.logical) else {
+                    continue;
+                };
+                if let Err(at) = ids.binary_search(&object.logical) {
+                    ids.try_reserve(1).map_err(|_| Error::Allocation)?;
+                    ids.insert(at, object.logical);
+                }
+            }
+            Ok(())
+        });
+        if updated.is_err() {
+            self.kinds.forget();
+        }
+    }
+
     fn lookup(
         &self,
         mut object: ObjectRef,
@@ -512,40 +723,20 @@ impl Store {
                 _ => break,
             }
         }
-        let count = self.records.len();
-        let mut frames = Vec::new();
-        let mut order = Vec::new();
-        let mut seen = HashSet::new();
-        frames.try_reserve(count).map_err(|_| Error::Allocation)?;
-        order.try_reserve(count).map_err(|_| Error::Allocation)?;
-        seen.try_reserve(count).map_err(|_| Error::Allocation)?;
-        frames.push((object, 0usize));
-        seen.insert(object);
-        while let Some((current, next)) = frames.pop() {
-            let record = self.record(current)?;
-            if next < record.prototypes.len() {
-                let parent = record.prototypes[record.prototypes.len() - 1 - next];
-                self.record(parent)?;
-                frames.push((current, next + 1));
-                if seen.insert(parent) {
-                    frames.push((parent, 0));
+        self.with_order(object, |order| {
+            for &current in order {
+                if let Some(definer) = after {
+                    if current == definer {
+                        after = None;
+                    }
+                    continue;
                 }
-            } else {
-                order.push(current);
-            }
-        }
-        for current in order.into_iter().rev() {
-            if let Some(definer) = after {
-                if current == definer {
-                    after = None;
+                if let Some(value) = self.record(current)?.properties.get(&property) {
+                    return Ok(Some(*value));
                 }
-                continue;
             }
-            if let Some(value) = self.record(current)?.properties.get(&property) {
-                return Ok(Some(*value));
-            }
-        }
-        Ok(None)
+            Ok(None)
+        })
     }
 
     /// The object that defines `property` for `object`, in the same order the
@@ -563,34 +754,14 @@ impl Store {
                 _ => break,
             }
         }
-        let count = self.records.len();
-        let mut frames = Vec::new();
-        let mut order = Vec::new();
-        let mut seen = HashSet::new();
-        frames.try_reserve(count).map_err(|_| Error::Allocation)?;
-        order.try_reserve(count).map_err(|_| Error::Allocation)?;
-        seen.try_reserve(count).map_err(|_| Error::Allocation)?;
-        frames.push((current, 0usize));
-        seen.insert(current);
-        while let Some((at, next)) = frames.pop() {
-            let record = self.record(at)?;
-            if next < record.prototypes.len() {
-                let parent = record.prototypes[record.prototypes.len() - 1 - next];
-                self.record(parent)?;
-                frames.push((at, next + 1));
-                if seen.insert(parent) {
-                    frames.push((parent, 0));
+        self.with_order(current, |order| {
+            for &at in order {
+                if self.record(at)?.properties.contains_key(&property) {
+                    return Ok(Some(at));
                 }
-            } else {
-                order.push(at);
             }
-        }
-        for at in order.into_iter().rev() {
-            if self.record(at)?.properties.contains_key(&property) {
-                return Ok(Some(at));
-            }
-        }
-        Ok(None)
+            Ok(None)
+        })
     }
 
     pub fn is_valid(&self, object: ObjectRef) -> bool {
@@ -638,6 +809,18 @@ impl Store {
                         .binary_search(&object.logical)
                         .expect("indexed object");
                     self.record_order.remove(index);
+                    self.kinds.orders.get_mut().remove(&object.logical);
+                    self.kinds.derived.get_mut().remove(&object.logical);
+                    if record.extended {
+                        // Its descendants now name an expired prototype.
+                        self.kinds.forget();
+                    } else if !record.prototypes.is_empty() {
+                        for ids in self.kinds.derived.get_mut().values_mut() {
+                            if let Ok(at) = ids.binary_search(&object.logical) {
+                                ids.remove(at);
+                            }
+                        }
+                    }
                     self.string_bytes -= record.text.as_ref().map_or(0, String::len)
                         + record.string_buffer.as_ref().map_or(0, String::len);
                     self.properties -= record.properties.len() + record.vector_charge;
@@ -721,9 +904,10 @@ impl Objects<'_> {
             self.store.destroy(root);
         }
         self.store.terminal = true;
-        self.store.records = HashMap::new();
+        self.store.records = IdMap::default();
         self.store.record_order = Vec::new();
-        self.store.statics = HashMap::new();
+        self.store.kinds = Kinds::default();
+        self.store.statics = IdMap::default();
         self.store.cleanup = Vec::new();
         self.store.roots = Vec::new();
         Err(error)
@@ -1555,10 +1739,11 @@ impl Objects<'_> {
                 collection: None,
                 parent: None,
                 prototypes: Vec::new(),
+                extended: false,
                 children: Vec::new(),
-                properties: HashMap::new(),
-                owned_value_fields: HashMap::new(),
-                pending_constructions: HashMap::new(),
+                properties: IdMap::default(),
+                owned_value_fields: IdMap::default(),
+                pending_constructions: IdMap::default(),
             },
         );
         self.store.roots.push(object);
@@ -3575,6 +3760,26 @@ impl Objects<'_> {
         } else {
             0
         };
+        let indexed = self
+            .store
+            .kinds
+            .derived
+            .borrow()
+            .contains_key(&ancestor.logical);
+        if indexed || self.store.index_derived(ancestor) {
+            let derived = self.store.kinds.derived.borrow();
+            let ids = &derived[&ancestor.logical];
+            let mut index = ids.partition_point(|id| *id <= cursor);
+            while let Some(&id) = ids.get(index) {
+                index += 1;
+                if want.admits(self.store.records[&id].is_class) {
+                    return Ok(self.store.reference_to(id));
+                }
+            }
+            return Ok(None);
+        }
+        // Some record could not be classified. Walk every record so that the
+        // error surfaces exactly where the walk meets it.
         let mut index = self.store.record_order.partition_point(|id| *id <= cursor);
         while let Some(&id) = self.store.record_order.get(index) {
             index += 1;
@@ -3654,6 +3859,11 @@ impl Objects<'_> {
         if self.store.record(object)?.prototypes.is_empty() {
             return Ok(false);
         }
+        if let Ok(found) = self.store.inherits(object, ancestor) {
+            return Ok(found);
+        }
+        // An expired prototype, or no memory for the order. The full search
+        // decides which error is reported, or finds the ancestor before it.
         let mut pending = Vec::new();
         let mut seen = HashSet::new();
         let reserve = self.store.reservation().and_then(|()| {
@@ -3717,6 +3927,7 @@ impl Objects<'_> {
             .prototypes
             .push(prototype);
         self.store.inheritance_edges += 1;
+        self.store.note_prototype(object, prototype);
         Ok(())
     }
 
@@ -4711,6 +4922,164 @@ mod tests {
             state.objects().next_instance(Some(candidate), base),
             Ok(None)
         );
+    }
+
+    /// Every answer the kept inheritance views give must equal the answer a
+    /// fresh search gives, across creation, destruction of leaves and of
+    /// prototypes (which leaves expired edges behind), slot reuse, class marks,
+    /// later prototype additions, rollback and restore.
+    #[test]
+    fn kept_inheritance_views_agree_with_a_fresh_search_under_mutation() {
+        fn answers(objects: &mut Scope<'_>, all: &[ObjectRef]) -> Vec<String> {
+            let mut seen = Vec::new();
+            for &a in all {
+                for want in [Derived::Instances, Derived::Classes, Derived::Both] {
+                    let mut walk = Vec::new();
+                    let mut after = None;
+                    loop {
+                        let next = objects.next_derived(after, a, want);
+                        walk.push(next);
+                        match next {
+                            Ok(Some(found)) => after = Some(found),
+                            _ => break,
+                        }
+                    }
+                    seen.push(format!("walk {walk:?}"));
+                }
+                for &b in all {
+                    seen.push(format!("kind {:?}", objects.of_kind(a, b)));
+                    seen.push(format!("next {:?}", objects.next_instance(Some(b), a)));
+                }
+                for property in 1..4 {
+                    let property = PropertyId(property);
+                    seen.push(format!("get {:?}", objects.get(a, property)));
+                    seen.push(format!(
+                        "definer {:?}",
+                        objects.property_definer(a, property)
+                    ));
+                    for &b in all {
+                        seen.push(format!("after {:?}", objects.get_inherited(a, property, b)));
+                    }
+                }
+            }
+            seen
+        }
+        fn check(objects: &mut Scope<'_>, all: &[ObjectRef]) {
+            // Once with whatever the views hold, once with them rebuilt from
+            // nothing, and once more now that they are warm.
+            let kept = answers(objects, all);
+            objects.store.kinds.forget();
+            let fresh = answers(objects, all);
+            assert_eq!(kept, fresh);
+            assert_eq!(answers(objects, all), fresh);
+        }
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut random = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        for round in 0..40 {
+            let mut state = store(64, 4096);
+            let mut objects = state.scope().unwrap();
+            objects.set_journalling(round % 4 == 3);
+            // Expired handles stay in `all`, so stale cursors and ancestors are asked about too.
+            let mut all = Vec::new();
+            for step in 0..60 {
+                let live: Vec<ObjectRef> = all
+                    .iter()
+                    .copied()
+                    .filter(|o| objects.store.is_valid(*o))
+                    .collect();
+                match random(10) {
+                    0..=2 if live.len() < 24 => all.push(objects.create().unwrap()),
+                    3..=6 if live.len() > 1 => {
+                        let object = live[random(live.len())];
+                        let prototype = live[random(live.len())];
+                        match objects.add_prototype(object, prototype) {
+                            Ok(()) | Err(Error::InheritanceCycle | Error::Expired) => {}
+                            other => panic!("{other:?}"),
+                        }
+                    }
+                    7 if !live.is_empty() => {
+                        let object = live[random(live.len())];
+                        objects
+                            .set(object, PropertyId(1 + random(3) as u32), Value::Int(step))
+                            .unwrap();
+                    }
+                    8 if !live.is_empty() => {
+                        objects.store.mark_class(live[random(live.len())]).unwrap()
+                    }
+                    9 if !live.is_empty() => objects.destroy(live[random(live.len())]).unwrap(),
+                    _ => {}
+                }
+                if step % 3 == 0 {
+                    check(&mut objects, &all);
+                }
+                if round % 4 == 3 && step % 20 == 19 {
+                    let delta = objects.take_container_journal();
+                    objects.revert_containers(delta);
+                    check(&mut objects, &all);
+                }
+            }
+            check(&mut objects, &all);
+        }
+    }
+
+    /// A class walk reads the kept list of descendants, which creation and
+    /// destruction keep exact without discarding it.
+    #[test]
+    fn class_walks_keep_their_index_across_instance_creation_and_destruction() {
+        let mut state = store(40, 80);
+        let mut objects = state.scope().unwrap();
+        let base = objects.create().unwrap();
+        let mixin = objects.create().unwrap();
+        let class = objects.create().unwrap();
+        objects.add_prototype(class, base).unwrap();
+        objects.add_prototype(class, mixin).unwrap();
+        for object in [base, mixin, class] {
+            objects.store.mark_class(object).unwrap();
+        }
+        let first = objects.create().unwrap();
+        objects.add_prototype(first, class).unwrap();
+        for ancestor in [base, mixin, class] {
+            assert_eq!(objects.next_instance(None, ancestor), Ok(Some(first)));
+        }
+        let listed = |objects: &Scope<'_>, ancestor: ObjectRef| {
+            objects.store.kinds.derived.borrow()[&ancestor.logical].clone()
+        };
+        assert_eq!(listed(&objects, base), [class.logical, first.logical]);
+        // A new instance joins every list its class belongs to, in slot order.
+        let unrelated = objects.create().unwrap();
+        let second = objects.create().unwrap();
+        objects.add_prototype(second, class).unwrap();
+        for ancestor in [base, mixin] {
+            assert_eq!(
+                listed(&objects, ancestor),
+                [class.logical, first.logical, second.logical]
+            );
+        }
+        assert_eq!(listed(&objects, class), [first.logical, second.logical]);
+        // Destroying an instance removes it; unrelated records change nothing.
+        objects.destroy(first).unwrap();
+        objects.destroy(unrelated).unwrap();
+        assert_eq!(listed(&objects, mixin), [class.logical, second.logical]);
+        assert_eq!(objects.next_instance(None, base), Ok(Some(second)));
+        assert_eq!(objects.next_instance(Some(second), base), Ok(None));
+        // Destroying something inherited from discards the lists. Its
+        // descendants now name an expired prototype, so nothing is kept and
+        // the record-by-record search answers: it finds `base` before the
+        // expired edge, and reports the expiry when it must look past it.
+        objects.destroy(mixin).unwrap();
+        assert!(objects.store.kinds.derived.borrow().is_empty());
+        let other = objects.create().unwrap();
+        assert_eq!(objects.next_instance(None, base), Ok(Some(second)));
+        assert_eq!(objects.next_instance(None, other), Err(Error::Expired));
+        assert!(objects.store.kinds.derived.borrow().is_empty());
+        assert!(objects.store.kinds.orders.borrow().is_empty());
+        assert_eq!(objects.of_kind(second, base), Ok(true));
+        assert_eq!(objects.of_kind(second, other), Err(Error::Expired));
     }
 
     /// A flag naming no kind is a mistake, not an empty walk.

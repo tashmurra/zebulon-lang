@@ -232,7 +232,7 @@ impl Store {
     }
 }
 struct Decode<'a> {
-    refs: &'a HashMap<u64, ObjectRef>,
+    refs: &'a IdMap<u64, ObjectRef>,
     session: u64,
     limits: Limits,
 }
@@ -303,7 +303,7 @@ impl Store {
             ))
         };
         let count = r.count(self.limits.objects)?;
-        let mut refs = HashMap::new();
+        let mut refs = IdMap::default();
         refs.try_reserve(count).map_err(|_| Error::Allocation)?;
         let mut ids = Vec::new();
         ids.try_reserve_exact(count)
@@ -330,7 +330,7 @@ impl Store {
             session: self.session,
             limits: self.limits,
         };
-        let mut records = HashMap::new();
+        let mut records = IdMap::default();
         records.try_reserve(count).map_err(|_| Error::Allocation)?;
         let (mut properties, mut bytes, mut edges) = (0usize, 0usize, 0usize);
         for &id in &ids {
@@ -351,7 +351,7 @@ impl Store {
             }
             edges = edges.checked_add(n).ok_or(Error::ResourceLimit)?;
             let n = r.count(self.limits.properties)?;
-            let mut fields = HashMap::new();
+            let mut fields = IdMap::default();
             fields.try_reserve(n).map_err(|_| Error::Allocation)?;
             for _ in 0..n {
                 let p = PropertyId(u32::try_from(r.word()?).map_err(|_| Error::InvalidArgument)?);
@@ -360,7 +360,7 @@ impl Store {
                 }
             }
             let n = r.count(self.limits.properties)?;
-            let mut owned_value_fields = HashMap::new();
+            let mut owned_value_fields = IdMap::default();
             owned_value_fields
                 .try_reserve(n)
                 .map_err(|_| Error::Allocation)?;
@@ -547,10 +547,11 @@ impl Store {
                     collection,
                     parent,
                     prototypes,
+                    extended: false,
                     children,
                     properties: fields,
                     owned_value_fields,
-                    pending_constructions: HashMap::new(),
+                    pending_constructions: IdMap::default(),
                 },
             );
         }
@@ -654,7 +655,7 @@ impl Store {
             return Err(Error::InvalidArgument);
         }
         let n = r.count(self.limits.objects)?;
-        let mut statics = HashMap::new();
+        let mut statics = IdMap::default();
         statics.try_reserve(n).map_err(|_| Error::Allocation)?;
         for _ in 0..n {
             let slot = u32::try_from(r.word()?).map_err(|_| Error::InvalidArgument)?;
@@ -676,6 +677,16 @@ impl Store {
             .max(incarnation)
             .checked_add(1)
             .ok_or(Error::IdentityExhausted)?;
+        // Mark what is inherited from, as adding each prototype would have.
+        for id in &ids {
+            for index in 0..records[id].prototypes.len() {
+                let prototype = records[id].prototypes[index].logical;
+                records
+                    .get_mut(&prototype)
+                    .ok_or(Error::InvalidArgument)?
+                    .extended = true;
+            }
+        }
         store.records = records;
         // The save's validated ID list is already strictly increasing. Rebuild
         // the runtime index without serializing any new state or old handles.

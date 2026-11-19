@@ -175,6 +175,7 @@ impl Objects<'_> {
                 .get_mut(&d.object.logical)
                 .expect("checked record");
             let (old_properties, old_bytes) = charges(record);
+            let inheritance_changed = record.prototypes != d.prototypes;
             self.store.inheritance_edges =
                 self.store.inheritance_edges - record.prototypes.len() + d.prototypes.len();
             record.vector = d.vector;
@@ -187,6 +188,9 @@ impl Objects<'_> {
             let (new_properties, new_bytes) = charges(record);
             self.store.properties = self.store.properties - old_properties + new_properties;
             self.store.string_bytes = self.store.string_bytes - old_bytes + new_bytes;
+            if inheritance_changed {
+                self.store.kinds.forget();
+            }
             count += 1;
         }
         count

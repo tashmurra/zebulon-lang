@@ -44,7 +44,7 @@ The explicit `--model ownership` profile provides lexical ownership and acyclic 
 
 ## Compiler output and limits
 
-`check` validates the supported source subset. `inspect` exposes tokens, preprocessed text, syntax, intermediate representation and LLVM stages. `build` supports scalar executables, objects, static libraries and shared bundles; object/world programs currently use shared bundles. `--opt O0|O2` controls optimization. Full LTO is available for optimized scalar shared bundles; it is not a general world-program option.
+`check` validates the supported source subset. `inspect` exposes tokens, preprocessed text, syntax, intermediate representation and LLVM stages. `build` supports scalar executables, objects, static libraries and shared bundles; object/world programs currently use shared bundles. `--opt O0|O2` controls optimization of the program; the embedded runtime of an object/world bundle is always optimized. Full LTO is available for optimized scalar shared bundles; it is not a general world-program option.
 
 The default source-size limit is 16 MiB and can be set with `--max-source-bytes`. Encoding options include UTF-8, ASCII, Latin-1 and UTF-16. Diagnostics identify source coordinates, including included files where the preprocessing map applies.
 
