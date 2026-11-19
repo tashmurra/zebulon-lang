@@ -66,6 +66,12 @@ avoid recompiling an unchanged runtime:
 zebc build examples/world.t --opt O2 --emit shared --runtime-cache build/runtime-cache --out-dir build/world-cached
 ```
 
+Static initialization of a world (the generated `$initializers` function and
+`zeb_initialize_objects`) is emitted `noinline optnone`. Each runs once, and each
+is a single function whose size follows the number of declared objects;
+optimizing them dominated `O2` builds of large worlds without changing turn
+cost.
+
 The output directory must be new each time. The cache is opt-in and checks runtime
 sources, toolchain, recipe and architecture; program-only changes can reuse it,
 while compiler/runtime, optimization or toolchain changes may require a cold build.

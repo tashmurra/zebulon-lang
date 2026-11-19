@@ -609,7 +609,7 @@ pub(crate) fn emit_declarations(ast: &Ast) -> Result<String, Diagnostic> {
         }};
     }
     line!(
-        "declare i64 @zeb_objects_call(i32, i64, i64, i64, i64)\ndeclare i32 @zeb_objects_status()\n\ndefine i32 @zeb_initialize_objects(i64 %session) {{\nentry:\n"
+        "declare i64 @zeb_objects_call(i32, i64, i64, i64, i64)\ndeclare i32 @zeb_objects_status()\n\ndefine i32 @zeb_initialize_objects(i64 %session) noinline optnone {{\nentry:\n"
     );
     let mut step = 0usize;
     macro_rules! check_status {

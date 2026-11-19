@@ -3134,6 +3134,18 @@ fn emit_module(
             } else {
                 None
             };
+            // Static initialization runs once and is one function whose size
+            // follows the number of objects declared. Optimizing it buys
+            // nothing at run time and dominates the native build of a large
+            // world, so the optimizer is told to leave it as written.
+            let attributes = match &ast.nodes[f.source.0].syntax {
+                Syntax::Function { name, .. }
+                    if attributes.is_none() && name == "$initializers" =>
+                {
+                    Some(" noinline optnone")
+                }
+                _ => attributes,
+            };
             if optimize {
                 e.line(format_args!(
                     "; {} llvm-effects source-byte {}: function {fi}; {}",
