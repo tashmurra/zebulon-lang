@@ -132,6 +132,32 @@ enumeration, so performance comparisons should include allocation/cleanup
 workloads as well as repeated class walks. Sparse logical IDs do not require
 scanning the gaps or allocating storage up to the highest ID.
 
+### World values, turn cleanup and undo journals
+
+A value stored into a World record is promoted with everything it reaches.
+Overwriting the property does not free the old value, because an undo interval
+or another property may still name it. The store therefore reclaims by
+reachability, and only what is safe to reclaim: World text and list records
+that own nothing, are owned by nothing and carry no entity state. They are
+immutable and unobservable except through a reference. Every other record is a
+root, as are statics, open journals, relation rows, the retained undo history
+and the session's module-constant texts and lists; a kept list keeps what it
+holds. Entities are never reclaimed.
+
+The pass runs only where the generated cycle itself begins or ends a command
+(cycle operations 0 and 1 issued with `b = 1`), when no generated function
+holds a value in a local. The same operations issued by a program from inside
+a function (`b = 0`) do not reclaim. It is skipped while the store is within a
+quarter (plus fixed slack) of its size after the previous pass, so its cost is
+amortized; the first boundary always runs it, which frees what world
+construction and `startup` left behind. A pass that cannot allocate its working
+set frees nothing and is retried at the next boundary.
+
+Turn cleanup and reclamation destroy their records as one batch and then filter
+the sorted slot index and the root list once. Property and container journals
+keep a set of what they have already recorded, so a write asks one question
+instead of reading the journal. Both were quadratic in the size of a turn.
+
 Measure code changes at the same optimization level first, then compare native
 `--opt O2` builds. Keep benchmark data and native fingerprints under ignored
 `build/`; record the source revision, input world and command sequence, host

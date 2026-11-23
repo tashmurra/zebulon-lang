@@ -48,6 +48,7 @@ impl Hasher for IdHasher {
     }
 }
 pub(crate) type IdMap<K, V> = HashMap<K, V, BuildHasherDefault<IdHasher>>;
+pub(crate) type IdSet<K> = HashSet<K, BuildHasherDefault<IdHasher>>;
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
@@ -315,6 +316,103 @@ impl Kinds {
     }
 }
 
+fn value_reference(value: &Value) -> Option<ObjectRef> {
+    match value {
+        Value::Reference(r) | Value::Text(r) | Value::List(r) => Some(*r),
+        _ => None,
+    }
+}
+
+impl PropertyDelta {
+    /// Every record this delta names, so that undo can still put it back.
+    pub(crate) fn references(
+        &self,
+        visit: &mut dyn FnMut(ObjectRef) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        visit(self.object)?;
+        match self.previous.as_ref().and_then(value_reference) {
+            Some(reference) => visit(reference),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Record {
+    /// A world text or list value that stands alone: immutable, owned by
+    /// nothing, owning nothing, and with none of the state an entity has.
+    /// Only such records are reclaimed when nothing refers to them.
+    fn is_free_value(&self) -> bool {
+        self.live
+            && self.lifetime == Lifetime::World
+            && self.parent.is_none()
+            && (self.text.is_some() || self.list.is_some())
+            && self.list_remaining.is_none()
+            && !self.is_class
+            && !self.extended
+            && self.closure.is_none()
+            && self.string_buffer.is_none()
+            && self.vector.is_none()
+            && self.lookup.is_none()
+            && self.dictionary.is_none()
+            && self.collection.is_none()
+            && self.prototypes.is_empty()
+            && self.children.is_empty()
+            && self.properties.is_empty()
+            && self.owned_value_fields.is_empty()
+            && self.pending_constructions.is_empty()
+    }
+
+    /// Every record this one refers to, in any of its roles.
+    fn references(
+        &self,
+        visit: &mut dyn FnMut(ObjectRef) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let values = self
+            .properties
+            .values()
+            .chain(self.list.iter().flatten())
+            .chain(self.vector.iter().flatten())
+            .chain(self.closure.iter().flat_map(|env| env.values.iter()));
+        for reference in values.filter_map(value_reference) {
+            visit(reference)?;
+        }
+        if let Some(table) = &self.lookup {
+            for (key, value) in &table.scalars {
+                if let LookupKey::Object(reference) = key {
+                    visit(*reference)?;
+                }
+                if let Some(reference) = value_reference(value) {
+                    visit(reference)?;
+                }
+            }
+            let rest = table.strings.values().chain([&table.default]);
+            for reference in rest.filter_map(value_reference) {
+                visit(reference)?;
+            }
+        }
+        for entry in self.dictionary.iter().flatten() {
+            visit(entry.object)?;
+        }
+        for member in self.collection.iter().flatten() {
+            visit(member.slot)?;
+            visit(member.object)?;
+        }
+        for pending in self.pending_constructions.values() {
+            visit(pending.object)?;
+        }
+        let direct = self
+            .owned_value_fields
+            .values()
+            .chain(&self.children)
+            .chain(&self.prototypes)
+            .chain(&self.parent);
+        for reference in direct {
+            visit(*reference)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Cleanup {
     Enter(ObjectRef),
@@ -335,7 +433,19 @@ pub struct Store {
     /// while `journalling` is off, which is how world construction avoids
     /// recording anything.
     journal: Vec<PropertyDelta>,
+    /// The (record, property) pairs `journal` already holds, so that a write
+    /// asks one question instead of reading the whole journal.
+    journalled: IdSet<(ObjectRef, PropertyId)>,
     container_journal: Vec<ContainerDelta>,
+    /// The records `container_journal` already holds a snapshot of.
+    container_journalled: IdSet<ObjectRef>,
+    /// Store sizes above which unreferenced world values are worth looking
+    /// for again: (records, properties, string bytes). Zero until the first
+    /// command cycle ends, so construction's leftovers go at once.
+    reclaim_above: (usize, usize, usize),
+    /// Set while many records are destroyed together: the sorted slot index is
+    /// then filtered once afterwards instead of shifted for each record.
+    batch_release: bool,
     container_journal_properties: usize,
     container_journal_bytes: usize,
     journalling: bool,
@@ -376,7 +486,11 @@ impl Store {
             default_lifetime: Lifetime::World,
             free_slots: Vec::new(),
             journal: Vec::new(),
+            journalled: IdSet::default(),
             container_journal: Vec::new(),
+            container_journalled: IdSet::default(),
+            reclaim_above: (0, 0, 0),
+            batch_release: false,
             container_journal_properties: 0,
             container_journal_bytes: 0,
             journalling: false,
@@ -764,6 +878,128 @@ impl Store {
         })
     }
 
+    /// Destroy several parentless records and whatever they own. The sorted
+    /// slot index and the root list are filtered once for the whole batch; one
+    /// at a time each removal searches and shifts them, which made a turn's
+    /// cleanup quadratic in the number of records it made. Answers how many
+    /// records went.
+    fn release_many(&mut self, doomed: &[ObjectRef]) -> usize {
+        let before = self.records.len();
+        self.batch_release = true;
+        for object in doomed {
+            if self
+                .records
+                .get(&object.logical)
+                .is_some_and(|record| record.incarnation == object.incarnation)
+            {
+                self.destroy(*object);
+            }
+        }
+        self.batch_release = false;
+        let records = &self.records;
+        self.record_order.retain(|id| records.contains_key(id));
+        self.roots.retain(|root| {
+            records
+                .get(&root.logical)
+                .is_some_and(|record| record.incarnation == root.incarnation)
+        });
+        before - self.records.len()
+    }
+
+    /// Whether the store has grown enough since unreferenced world values were
+    /// last reclaimed for another look to be worth its pass over the store.
+    pub(crate) fn reclaim_due(&self) -> bool {
+        let (records, properties, bytes) = self.reclaim_above;
+        self.records.len() > records || self.properties > properties || self.string_bytes > bytes
+    }
+
+    /// Free world text and list values that nothing can reach any more.
+    ///
+    /// A value stored into world state is promoted, and stays a World record
+    /// after the property that held it is overwritten. Text and lists are
+    /// immutable and have no identity a program can observe except through a
+    /// reference, so one that no record, journal or `held` reference reaches
+    /// can never be read again. Entities are different (a class walk finds an
+    /// instance nothing refers to) and are never reclaimed here.
+    ///
+    /// `held` names what the caller keeps outside the store: undo history and
+    /// anything else that outlives a command cycle. Call it only between
+    /// cycles, when generated code holds no values. A failure to allocate the
+    /// working set frees nothing and is not terminal. Answers how many records
+    /// were freed.
+    pub(crate) fn reclaim_values(&mut self, held: &[ObjectRef]) -> Result<usize, Error> {
+        if self.terminal {
+            return Err(Error::Terminal);
+        }
+        let mut kept: IdSet<u64> = IdSet::default();
+        let mut pending: Vec<u64> = Vec::new();
+        fn reach(
+            store: &Store,
+            kept: &mut IdSet<u64>,
+            pending: &mut Vec<u64>,
+            reference: ObjectRef,
+        ) -> Result<(), Error> {
+            if reference.session != store.session || kept.contains(&reference.logical) {
+                return Ok(());
+            }
+            let reclaimable = store
+                .records
+                .get(&reference.logical)
+                .is_some_and(|r| r.incarnation == reference.incarnation && r.is_free_value());
+            if reclaimable {
+                kept.try_reserve(1).map_err(|_| Error::Allocation)?;
+                pending.try_reserve(1).map_err(|_| Error::Allocation)?;
+                kept.insert(reference.logical);
+                pending.push(reference.logical);
+            }
+            Ok(())
+        }
+        // Everything that is not itself a free value is a root, entities
+        // included; so are the journals of an open cycle and what the caller holds.
+        for record in self.records.values() {
+            if !record.is_free_value() {
+                record.references(&mut |r| reach(self, &mut kept, &mut pending, r))?;
+            }
+        }
+        for object in self.statics.values() {
+            reach(self, &mut kept, &mut pending, *object)?;
+        }
+        for delta in &self.journal {
+            delta.references(&mut |r| reach(self, &mut kept, &mut pending, r))?;
+        }
+        for delta in &self.container_journal {
+            delta.references(&mut |r| reach(self, &mut kept, &mut pending, r))?;
+        }
+        for object in held {
+            reach(self, &mut kept, &mut pending, *object)?;
+        }
+        // A kept list keeps what it holds.
+        while let Some(id) = pending.pop() {
+            self.records[&id].references(&mut |r| reach(self, &mut kept, &mut pending, r))?;
+        }
+        let mut doomed = Vec::new();
+        for &id in &self.record_order {
+            let record = &self.records[&id];
+            if record.is_free_value() && !kept.contains(&id) {
+                doomed.try_reserve(1).map_err(|_| Error::Allocation)?;
+                doomed.push(ObjectRef {
+                    session: self.session,
+                    logical: id,
+                    incarnation: record.incarnation,
+                });
+            }
+        }
+        let freed = self.release_many(&doomed);
+        // Look again once the store is a quarter larger than what is in use
+        // now, with enough slack that a small world is not walked every turn.
+        self.reclaim_above = (
+            self.records.len() + self.records.len() / 4 + 256,
+            self.properties + self.properties / 4 + 4096,
+            self.string_bytes + self.string_bytes / 4 + 16 * 1024,
+        );
+        Ok(freed)
+    }
+
     pub fn is_valid(&self, object: ObjectRef) -> bool {
         self.record(object).is_ok()
     }
@@ -804,11 +1040,13 @@ impl Store {
                         .records
                         .remove(&object.logical)
                         .expect("revoked object");
-                    let index = self
-                        .record_order
-                        .binary_search(&object.logical)
-                        .expect("indexed object");
-                    self.record_order.remove(index);
+                    if !self.batch_release {
+                        let index = self
+                            .record_order
+                            .binary_search(&object.logical)
+                            .expect("indexed object");
+                        self.record_order.remove(index);
+                    }
                     self.kinds.orders.get_mut().remove(&object.logical);
                     self.kinds.derived.get_mut().remove(&object.logical);
                     if record.extended {
@@ -1769,6 +2007,7 @@ impl Objects<'_> {
 
     /// Take the cycle's property writes, leaving the journal empty.
     pub fn take_property_journal(&mut self) -> Vec<PropertyDelta> {
+        self.store.journalled.clear();
         std::mem::take(&mut self.store.journal)
     }
 
@@ -1816,11 +2055,7 @@ impl Objects<'_> {
         }
         if self.store.journalling
             && self.store.record(object)?.lifetime == Lifetime::World
-            && !self
-                .store
-                .journal
-                .iter()
-                .any(|d| d.object == object && d.property == property)
+            && !self.store.journalled.contains(&(object, property))
         {
             let previous = self
                 .store
@@ -1835,6 +2070,11 @@ impl Objects<'_> {
                 .journal
                 .try_reserve(1)
                 .map_err(|_| Error::Allocation)?;
+            self.store
+                .journalled
+                .try_reserve(1)
+                .map_err(|_| Error::Allocation)?;
+            self.store.journalled.insert((object, property));
             self.store.journal.push(PropertyDelta {
                 object,
                 property,
@@ -1980,19 +2220,8 @@ impl Objects<'_> {
         for object in held {
             self.promote(object)?;
         }
-        let mut released = 0;
-        for object in roots {
-            // A nested Turn record goes with the one that owns it.
-            if !self.store.records.contains_key(&object.logical) {
-                continue;
-            }
-            if let Some(index) = self.store.roots.iter().position(|r| *r == object) {
-                self.store.roots.remove(index);
-            }
-            let before = self.store.records.len();
-            self.store.destroy(object);
-            released += before - self.store.records.len();
-        }
+        // A nested Turn record goes with the one that owns it.
+        let released = self.store.release_many(&roots);
         // nothing is swept here. Destroying a record is the only way a
         // record leaves the store, and it puts the slot back on the free list as
         // it goes, so rediscovering freed slots by walking the whole identity
@@ -3949,11 +4178,7 @@ impl Objects<'_> {
         // which would make undo put back a turn that did nothing.
         if self.store.journalling
             && self.store.record(object)?.lifetime == Lifetime::World
-            && !self
-                .store
-                .journal
-                .iter()
-                .any(|d| d.object == object && d.property == property)
+            && !self.store.journalled.contains(&(object, property))
         {
             let previous = self
                 .store
@@ -3968,6 +4193,11 @@ impl Objects<'_> {
                 .journal
                 .try_reserve(1)
                 .map_err(|_| Error::Allocation)?;
+            self.store
+                .journalled
+                .try_reserve(1)
+                .map_err(|_| Error::Allocation)?;
+            self.store.journalled.insert((object, property));
             self.store.journal.push(PropertyDelta {
                 object,
                 property,
@@ -5080,6 +5310,178 @@ mod tests {
         assert!(objects.store.kinds.orders.borrow().is_empty());
         assert_eq!(objects.of_kind(second, base), Ok(true));
         assert_eq!(objects.of_kind(second, other), Err(Error::Expired));
+    }
+
+    /// World text and lists that nothing refers to any more are freed between
+    /// cycles; anything a record, an undo delta or the caller still names stays,
+    /// and so does every entity, referenced or not.
+    #[test]
+    fn unreferenced_world_values_are_reclaimed_and_everything_reachable_is_kept() {
+        let mut state = store(100, 400);
+        let held_by = |deltas: &[PropertyDelta]| {
+            let mut held = Vec::new();
+            for delta in deltas {
+                delta
+                    .references(&mut |r| {
+                        held.push(r);
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            held
+        };
+        let (entity, lone, table, vector, closure) = {
+            let mut objects = state.objects();
+            objects.set_lifetime_model(true);
+            let entity = objects.create().unwrap();
+            let lone = objects.create().unwrap();
+            let table = objects.new_lookup().unwrap();
+            let vector = objects.new_vector(4).unwrap();
+            let closure = objects
+                .new_closure(0, &[Capture::Copy(Value::Nil)])
+                .unwrap();
+            for (property, holder) in [(7, table), (8, vector), (9, closure)] {
+                objects
+                    .set(entity, PropertyId(property), Value::Reference(holder))
+                    .unwrap();
+            }
+            (entity, lone, table, vector, closure)
+        };
+        // One cycle: overwrite a text twice and build a nested list.
+        let (first, second, list, inner, in_table, in_vector, journal) = {
+            let mut objects = state.objects();
+            objects.set_default_lifetime(Lifetime::Turn);
+            objects.set_journalling(true);
+            let first = objects.new_text("first").unwrap();
+            objects
+                .set(entity, PropertyId(1), Value::Text(first))
+                .unwrap();
+            let second = objects.new_text("second").unwrap();
+            objects
+                .set(entity, PropertyId(1), Value::Text(second))
+                .unwrap();
+            let inner = objects.new_text("inner").unwrap();
+            let list = objects
+                .new_list(&[Value::Text(inner), Value::Int(1)])
+                .unwrap();
+            objects
+                .set(entity, PropertyId(2), Value::List(list))
+                .unwrap();
+            let in_table = objects.new_text("in table").unwrap();
+            objects
+                .lookup_set(table, Value::Int(1), Value::Text(in_table))
+                .unwrap();
+            let in_vector = objects.new_text("in vector").unwrap();
+            objects
+                .vector_append(vector, Value::Text(in_vector))
+                .unwrap();
+            let scratch = objects.new_text("scratch").unwrap();
+            let journal = objects.take_property_journal();
+            objects.take_container_journal();
+            objects.set_journalling(false);
+            assert_eq!(objects.release_turn_records(), Ok(1));
+            assert_eq!(objects.text(scratch), Err(Error::Expired));
+            objects.set_default_lifetime(Lifetime::World);
+            (first, second, list, inner, in_table, in_vector, journal)
+        };
+        assert!(state.reclaim_due());
+        // Only the overwritten text is unreachable.
+        assert_eq!(state.reclaim_values(&held_by(&journal)), Ok(1));
+        assert!(!state.reclaim_due());
+        assert!(!state.is_valid(first));
+        for kept in [
+            entity, lone, table, vector, closure, second, list, inner, in_table, in_vector,
+        ] {
+            assert!(state.is_valid(kept));
+        }
+        assert_eq!(state.reclaim_values(&[]), Ok(0));
+        // A second cycle replaces both values. Its journal remembers what they
+        // held, so undo can put them back for as long as the journal is kept.
+        let journal = {
+            let mut objects = state.objects();
+            objects.set_default_lifetime(Lifetime::Turn);
+            objects.set_journalling(true);
+            let third = objects.new_text("third").unwrap();
+            objects
+                .set(entity, PropertyId(1), Value::Text(third))
+                .unwrap();
+            objects.set(entity, PropertyId(2), Value::Nil).unwrap();
+            // While the cycle is open the store's own journal holds them.
+            assert_eq!(objects.store.reclaim_values(&[]), Ok(0));
+            let journal = objects.take_property_journal();
+            objects.set_journalling(false);
+            assert_eq!(objects.release_turn_records(), Ok(0));
+            objects.set_default_lifetime(Lifetime::World);
+            journal
+        };
+        assert_eq!(state.reclaim_values(&held_by(&journal)), Ok(0));
+        assert_eq!(state.objects().revert_properties(&journal), 2);
+        assert_eq!(
+            state.objects().get(entity, PropertyId(1)),
+            Ok(Value::Text(second))
+        );
+        assert_eq!(state.objects().text(inner), Ok("inner"));
+        // Once that history is gone, so is what only it referred to: here the
+        // text the reverted write had stored.
+        assert_eq!(state.reclaim_values(&[]), Ok(1));
+        assert!(state.is_valid(second) && state.is_valid(list) && state.is_valid(inner));
+        // Dropping the list frees it and, with it, the text only it held.
+        state
+            .objects()
+            .set(entity, PropertyId(2), Value::Nil)
+            .unwrap();
+        assert_eq!(state.reclaim_values(&[]), Ok(2));
+        assert!(!state.is_valid(list) && !state.is_valid(inner));
+        assert!(state.is_valid(lone) && state.is_valid(in_table) && state.is_valid(in_vector));
+        // Slots, counters and the root list stay consistent for reuse.
+        let live = state.live_objects();
+        let reused = state.objects().new_text("reused").unwrap();
+        assert_eq!(state.live_objects(), live + 1);
+        assert_eq!(state.reclaim_values(&[reused]), Ok(0));
+        assert_eq!(state.reclaim_values(&[]), Ok(1));
+        assert_eq!(state.record_order.len(), state.records.len());
+        assert_eq!(
+            state.roots.len(),
+            state
+                .records
+                .values()
+                .filter(|r| r.parent.is_none())
+                .count()
+        );
+    }
+
+    /// A cycle journals each (record, property) and each container once,
+    /// however many times it is written, and starts afresh after the journal
+    /// is taken.
+    #[test]
+    fn journals_record_first_writes_once_per_cycle() {
+        let mut state = store(20, 80);
+        let mut objects = state.objects();
+        objects.set_lifetime_model(true);
+        let entity = objects.create().unwrap();
+        let vector = objects.new_vector(4).unwrap();
+        objects.set_journalling(true);
+        for cycle in 0..2 {
+            for value in 0..5 {
+                objects
+                    .set(entity, PropertyId(1), Value::Int(value))
+                    .unwrap();
+                objects
+                    .set(entity, PropertyId(2), Value::Int(value))
+                    .unwrap();
+                objects.vector_append(vector, Value::Int(value)).unwrap();
+            }
+            assert_eq!(objects.property_journal_len(), 2);
+            assert_eq!(objects.container_journal_len(), 1);
+            let properties = objects.take_property_journal();
+            let previous = if cycle == 0 {
+                None
+            } else {
+                Some(Value::Int(4))
+            };
+            assert_eq!(properties[0].previous, previous);
+            assert_eq!(objects.take_container_journal().len(), 1);
+        }
     }
 
     /// A flag naming no kind is a mistake, not an empty walk.

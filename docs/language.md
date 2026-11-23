@@ -32,7 +32,7 @@ Relations can have a third, enum-labelled column, and text-valued vocabulary rel
 
 ## Lifetimes and execution
 
-The default `--model lifetimes` uses Turn and World storage, automatic promotion and deterministic cleanup. Persistent World records survive completed command cycles; temporary Turn storage is reclaimed at the boundary. Relationships use checked identities rather than shared object ownership. These language rules are implemented explicitly and are not consequences of Rust's borrow checker.
+The default `--model lifetimes` uses Turn and World storage, automatic promotion and deterministic cleanup. Persistent World records survive completed command cycles; temporary Turn storage is reclaimed at the boundary. A text or list value stored into world state becomes a World record; once no property, container, relation or retained undo interval refers to it, it is freed at a later boundary between commands. Entities are never freed this way: a class walk can still find an instance nothing refers to, so removing one remains an explicit despawn. Everything a single command creates, including values it stores and then replaces, counts against the session limits until that command ends. Relationships use checked identities rather than shared object ownership. These language rules are implemented explicitly and are not consequences of Rust's borrow checker.
 
 A world declares `turn(tokens)` for text input, `act(verb, subjects)` for structured actions, or both. `startup()` is optional. Declare `enum token tokWord;` for tokenized input. The host starts and advances the cycle; the program does not need to write an input loop.
 

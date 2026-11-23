@@ -65,6 +65,26 @@ pub struct Relations {
     journalling: bool,
 }
 
+impl Relations {
+    /// Every record a row or an open journal entry names.
+    pub(crate) fn references(
+        &self,
+        visit: &mut dyn FnMut(ObjectRef) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        for table in &self.tables {
+            let rows = table.forward.values().chain(table.reverse.values());
+            for reference in rows.flatten().chain(table.outermost.values()) {
+                visit(*reference)?;
+            }
+        }
+        for delta in &self.journal {
+            visit(delta.left)?;
+            visit(delta.right)?;
+        }
+        Ok(())
+    }
+}
+
 fn reserve<T>(values: &mut Vec<T>, count: usize) -> Result<(), Error> {
     values.try_reserve(count).map_err(|_| Error::Allocation)
 }
