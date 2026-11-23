@@ -164,6 +164,72 @@ fn token_sequence<'a>(objects: &'a Objects<'_>, tokens: ObjectRef) -> Result<&'a
     }
 }
 
+impl State {
+    /// Free unreferenced world values if the store has grown enough to make
+    /// the pass worthwhile. Only for a point where no generated code is
+    /// running, since a value held only in a local is not visible here.
+    fn reclaim_values(&mut self) {
+        if !self.store.as_ref().is_some_and(Store::reclaim_due) {
+            return;
+        }
+        let mut held = Vec::new();
+        if self.held_references(&mut held).is_ok()
+            && let Some(store) = self.store.as_mut()
+        {
+            // No memory for the pass frees nothing; the next boundary tries again.
+            let _ = store.reclaim_values(&held);
+        }
+    }
+
+    /// Every record this session refers to from outside the store and keeps
+    /// across command cycles: undo history, relation rows, and the texts and
+    /// lists made from module constants. Fails, naming nothing, while a call,
+    /// iteration, construction, parse or sort is still in progress, because
+    /// what those hold is not listed here.
+    fn held_references(&self, held: &mut Vec<ObjectRef>) -> Result<(), Error> {
+        if !(self.constructions.is_empty()
+            && self.exceptions.is_empty()
+            && self.member_calls.is_empty()
+            && self.iterations.is_empty()
+            && self.parses.is_empty()
+            && self.sorts.is_empty())
+        {
+            return Err(Error::InvalidArgument);
+        }
+        let mut hold = |reference: ObjectRef| {
+            held.try_reserve(1).map_err(|_| Error::Allocation)?;
+            held.push(reference);
+            Ok(())
+        };
+        for cycle in &self.history {
+            for delta in &cycle.containers {
+                delta.references(&mut hold)?;
+            }
+            for delta in &cycle.properties {
+                delta.references(&mut hold)?;
+            }
+            for delta in &cycle.relations {
+                hold(delta.left)?;
+                hold(delta.right)?;
+            }
+        }
+        self.relations.references(&mut hold)?;
+        let listed = self
+            .init_regions
+            .iter()
+            .chain(&self.constant_region)
+            .chain(&self.constant_lists)
+            .chain(self.local_owners.iter().flatten())
+            .chain(self.returned_owners.iter().map(|(object, _)| object))
+            .chain(self.pattern_objects.iter().map(|(object, _)| object))
+            .chain(self.literal_texts.iter().map(|(_, object)| object));
+        for reference in listed {
+            hold(*reference)?;
+        }
+        Ok(())
+    }
+}
+
 fn error_code(error: Error) -> u32 {
     match error {
         Error::ForeignSession => 1,
@@ -2957,9 +3023,13 @@ impl State {
             // /: relation tables and the two lifetimes.
             store.ensure_active().map_err(error_code)?;
             if op == 139 {
-                if c != 0 || (b != 0 && a != 8) {
+                // `b` selects the session for 8. For 0 and 1 it is 1 when the
+                // host's own cycle issues the operation, between calls into
+                // the program, rather than the program from inside a function.
+                if c != 0 || (b != 0 && a != 8 && !(b == 1 && a <= 1)) {
                     return Err(11);
                 }
+                let boundary = b == 1 && a <= 1;
                 return match a {
                     // Bind this session to a handoff, so one process can run
                     // several independently.
@@ -2988,6 +3058,11 @@ impl State {
                             objects.set_journalling(true);
                         }
                         self.relations.set_journalling(true);
+                        // What world construction and `startup` left behind
+                        // goes before the first command needs the room.
+                        if boundary {
+                            self.reclaim_values();
+                        }
                         self.kind = 0;
                         Ok(0)
                     }
@@ -3029,6 +3104,12 @@ impl State {
                         store
                             .objects()
                             .set_default_lifetime(crate::objects::Lifetime::World);
+                        // Between cycles nothing generated holds a value, so
+                        // world text and lists that only overwritten
+                        // properties and expired history referred to can go.
+                        if boundary {
+                            self.reclaim_values();
+                        }
                         self.kind = 2;
                         i32::try_from(released).map(|n| n as u64).map_err(|_| 18u32)
                     }

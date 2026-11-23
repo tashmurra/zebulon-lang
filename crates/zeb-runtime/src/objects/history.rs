@@ -100,6 +100,39 @@ impl ContainerDelta {
         })
     }
 }
+impl ContainerDelta {
+    /// Every record this snapshot names, so that undo can still put it back.
+    pub(crate) fn references(
+        &self,
+        visit: &mut dyn FnMut(ObjectRef) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        visit(self.object)?;
+        for reference in self.vector.iter().flatten().filter_map(value_reference) {
+            visit(reference)?;
+        }
+        if let Some(table) = &self.lookup {
+            for (key, value) in &table.scalars {
+                if let LookupKey::Object(reference) = key {
+                    visit(*reference)?;
+                }
+                if let Some(reference) = value_reference(value) {
+                    visit(reference)?;
+                }
+            }
+            let rest = table.strings.values().chain([&table.default]);
+            for reference in rest.filter_map(value_reference) {
+                visit(reference)?;
+            }
+        }
+        for entry in self.dictionary.iter().flatten() {
+            visit(entry.object)?;
+        }
+        for prototype in &self.prototypes {
+            visit(*prototype)?;
+        }
+        Ok(())
+    }
+}
 fn charges(record: &Record) -> (usize, usize) {
     let mut properties = record.vector_charge;
     let mut bytes = record.string_buffer.as_ref().map_or(0, String::len);
@@ -117,11 +150,7 @@ impl Objects<'_> {
     pub(super) fn journal_container(&mut self, object: ObjectRef) -> Result<(), Error> {
         if !self.store.journalling
             || self.store.record(object)?.lifetime != Lifetime::World
-            || self
-                .store
-                .container_journal
-                .iter()
-                .any(|d| d.object == object)
+            || self.store.container_journalled.contains(&object)
         {
             return Ok(());
         }
@@ -149,6 +178,11 @@ impl Objects<'_> {
             .container_journal
             .try_reserve(1)
             .map_err(|_| Error::Allocation)?;
+        self.store
+            .container_journalled
+            .try_reserve(1)
+            .map_err(|_| Error::Allocation)?;
+        self.store.container_journalled.insert(object);
         self.store.container_journal.push(snapshot);
         self.store.container_journal_properties += properties;
         self.store.container_journal_bytes += bytes;
@@ -157,6 +191,7 @@ impl Objects<'_> {
     pub fn take_container_journal(&mut self) -> Vec<ContainerDelta> {
         self.store.container_journal_properties = 0;
         self.store.container_journal_bytes = 0;
+        self.store.container_journalled.clear();
         std::mem::take(&mut self.store.container_journal)
     }
     pub fn container_journal_len(&self) -> usize {

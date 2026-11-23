@@ -289,6 +289,55 @@ fn object_enumeration_survives_turn_expiry_despawn_and_restore() {
     );
 }
 
+/// Each step stores a new text and a new list into world state. With the
+/// consumer's default limit of 100000 objects, values that were never freed
+/// ended a session after about 12 of these large turns, or 500 small ones.
+#[test]
+#[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and host native prerequisites"]
+fn replaced_world_values_do_not_exhaust_a_long_session() {
+    let tmp = TempDir::new("world-value-reclaim");
+    let bundle = build(
+        &tmp.0,
+        "reclaim",
+        include_str!("../../../tests/native/world-value-reclaim.t"),
+        "shared",
+        "O2",
+        false,
+    );
+    let play = |commands: &str| {
+        let answer = capture(
+            &bundle,
+            bundle.join(common::exe("consumer")).to_str().unwrap(),
+            &[],
+            commands,
+            Duration::from_secs(120),
+        );
+        assert_eq!(answer.0, 0, "{}", answer.2);
+        assert!(answer.2.is_empty(), "{}", answer.2);
+        answer
+            .1
+            .lines()
+            .filter(|l| l.starts_with("[clock"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    // Undo a large turn and run it again, then keep going.
+    let rows = play(&format!("!1\n!2\n!1\n{}", "!1\n".repeat(60)));
+    assert_eq!(rows.len(), 63);
+    assert_eq!(rows[0], "[clock 810 clock 810 2 clock 810]");
+    assert_eq!(rows[1], "[clock 0 unset 0 none]");
+    assert_eq!(rows[2], rows[0]);
+    assert_eq!(rows[62], "[clock 49410 clock 49410 2 clock 49410]");
+    // Many small turns, then undo as far as history goes: every value an undo
+    // puts back must still be there.
+    let rows = play(&format!("{}{}", "!3\n".repeat(2000), "!2\n".repeat(33)));
+    assert_eq!(rows.len(), 2033);
+    assert_eq!(rows[1999], "[clock 50000 clock 50000 2 clock 50000]");
+    assert_eq!(rows[2000], "[clock 49975 clock 49975 2 clock 49975]");
+    assert_eq!(rows[2031], "[clock 49200 clock 49200 2 clock 49200]");
+    assert_eq!(rows[2032], rows[2031]);
+}
+
 #[test]
 #[ignore = "requires Rust 1.98.1, LLVM 22.1.8 and host native prerequisites"]
 fn world_rollback_and_process_boundary_persistence() {
